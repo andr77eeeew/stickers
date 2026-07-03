@@ -1,0 +1,8 @@
+.agents
+.antigravitycli
+.chrome-profile
+frontend/node_modules
+frontend/dist
+node_modules
+output/
+temp
