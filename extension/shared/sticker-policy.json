@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "maxBodyBytes": 12582912,
+  "allowedMimeTypes": [
+    "image/webp",
+    "image/jpeg",
+    "image/png",
+    "image/gif"
+  ],
+  "allowedHosts": {
+    "exact": [
+      "p16-common-sign.tiktokcdn.com"
+    ],
+    "subdomainLabelPrefixes": [
+      {
+        "parentDomain": "ibyteimg.com",
+        "prefix": "p16-tiktok-dm-sticker-sign-"
+      }
+    ]
+  },
+  "allowedPathExtensions": [
+    ".awebp",
+    ".webp",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".gif"
+  ],
+  "requiredPathMarkers": [
+    "video2sticker",
+    "photo-comment",
+    "/sticker/",
+    "tplv-dhq7zx"
+  ],
+  "rejectedPathMarkers": [
+    "avt-",
+    "/avatar",
+    "cropcenter",
+    "musically-maliva-obj",
+    "profile-photo",
+    "profile_photo",
+    "tos-maliva-avt"
+  ]
+}

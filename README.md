@@ -1,82 +1,142 @@
-# 💎 TikTok to Telegram: Sticker Powerhouse Suite
+# Sticker Powerhouse Suite
 
-A premium, production-grade tool designed to passively intercept WebP stickers from active TikTok chats and convert them into compliant formats ready for Telegram (`@Stickers` bot drag-and-drop).
+Локальное offline-first приложение для импорта, каталогизации и преобразования стикеров в форматы Telegram. Основной режим не подключается к TikTok: пользователь вручную передаёт локальные изображения и видео. Дополнительный live-режим получает только тела ответов, уже загруженных вкладкой TikTok, через явно открытую панель Chrome DevTools.
 
-The suite is built with a sleek Cyberpunk Obsidian-neon visual aesthetic and features a companion overlay injected directly into the TikTok interface.
+> Ни один неофициальный live-способ нельзя считать ban-safe. DevTools-режим уменьшает технический след по сравнению с CDP/DOM-автоматизацией, но не устраняет риск блокировки или нарушения правил платформы. Для минимального риска используйте только ручной импорт локальных файлов.
 
----
+## Что изменилось
 
-## 🚀 Key Features
+- Offline/manual import — режим по умолчанию.
+- Старые CDP, remote-debugging, content script, DOM observer и CDN refetch удалены из штатного потока.
+- Опциональное MV3-расширение использует `chrome.devtools.network.getContent()` и никогда не повторяет запрос к TikTok/CDN.
+- Сервер слушает только `127.0.0.1`; dashboard получает HttpOnly same-origin session перед API/WebSocket подключением.
+- Extension ingest требует Bearer token и фактические media bytes; URL-only payload не принимается.
+- Дедупликация выполняется по SHA-256 содержимого.
+- Вместо удаления библиотеки UI создаёт recoverable archive snapshot. Активная библиотека при этом не изменяется.
+- При первом запуске legacy JSON недеструктивно мигрирует в schema v2: перед atomic rewrite создаётся stickers_db.backup.json, query подписанных URL удаляются, а missing/stale состояния только помечаются; media-файлы не удаляются.
+- Все output-пути приходят от сервера; во frontend нет привязки к диску или каталогу проекта.
 
-1. **Instant Real-Time Capture (Zero-Reload Grabber)**:
-   Uses Chrome DevTools Protocol (CDP) to inject a passive DOM `MutationObserver` script. It detects incoming/outgoing stickers in TikTok chats and sends them to the local server in `< 10ms` without page reloads.
-2. **TikTok Overlay companion Mini-App**:
-   Injects a collapsible floating panel styled with obsidian-neon glassmorphism directly into the TikTok webpage. You can convert, scrub frames, and download sticker outputs without leaving the TikTok tab.
-3. **Transparent HTML5 Canvas Editor**:
-   Allows crops, rotations, scaling, top/bottom text overlays (Impact font), and an algorithmic silhouette stroke border outline generator utilizing offscreen compositing.
-4. **Low-Latency Media Pipeline**:
-   * **On-Demand Frame Extraction Cache (ODFC)**: Pre-warms memory with low-resolution frame previews on scrub timelines, avoiding thread pool contention.
-   * **FFmpeg CPU Queue**: Background task queue (max concurrency = 2) prevents high-CPU locks during VP9 WebM encodes.
-5. **Manual Tagging & Search**:
-   Allows user-assigned tags for fuzzy indexing in the main dashboard.
+## Установка
 
----
+Требуется Node.js 22.12 или новее и Chrome. FFmpeg поставляется зависимостью проекта.
 
-## 🛠️ Tech Stack
-
-* **Backend**: Node.js, Express, WebSockets (`ws`), `chrome-remote-interface` (CDP), `sharp` (metadata, resizes, canvas layering), `ffmpeg-static` (VP9 animated WebM encodes).
-* **Frontend**: React (Vite), Lucide Icons, Vanilla CSS (glowing obsidian styling).
-
----
-
-## 📁 Directory Structure
-
-```
-stickers/
-├── .agents/               # Custom Agent Rules & Context
-│   └── AGENTS.md          # Onboarding guide for future AI agents
-├── frontend/              # React Vite client dashboard
-│   ├── src/
-│   │   ├── App.jsx        # Main client interface & Canvas Editor
-│   │   ├── index.css      # Obsidian Cyberpunk design system
-│   │   └── main.jsx       # Entrypoint
-│   └── vite.config.js
-├── output/                # Database and converted sticker directories
-│   ├── captured/          # Original intercepted WebP files
-│   ├── statics/           # Compliant Telegram WebP static stickers
-│   ├── animated/          # Compliant Telegram VP9 WebM animated stickers
-│   └── stickers_db.json   # SQLite-like JSON database mapping stickers
-├── temp/                  # volative folders for frame extraction
-├── start-chrome.bat       # Script to launch Chrome in debug mode on port 9222
-├── server.js              # Core CDP connector, WebSocket & Media server
-├── ConversionQueue.js     # Background concurrency limiter for FFmpeg
-└── package.json           # Backend dependency configurations
-```
-
----
-
-## 🏁 How to Launch
-
-### Step 1: Launch Google Chrome in Debugging Mode
-Close all Chrome instances or launch the debugging session using the isolated profiles batch file:
 ```powershell
-.\start-chrome.bat
+npm run install-all
+Copy-Item .env.example .env
 ```
-*Note: This creates an isolated session under `.chrome-profile` listening on debugging port `9222`. You will need to log in to TikTok in this browser window.*
 
-### Step 2: Start the Servers
-Install dependencies and run the concurrently runner:
+Для DevTools live-capture задайте в `.env` длинный случайный `INGEST_TOKEN`. Offline/manual import не требует расширения, но dashboard всё равно использует автоматически создаваемую локальную session cookie.
+
+### Разработка
+
 ```powershell
-npm install
 npm run dev
 ```
-This boots:
-* **Backend Webhook/WebSocket Server**: `http://localhost:3001`
-* **Vite Frontend Dashboard**: `http://localhost:3000`
 
----
+- Dashboard: `http://127.0.0.1:3000`
+- Backend: `http://127.0.0.1:3001`
+- Vite проксирует `/api`, `/ws` и media paths к loopback backend, поэтому frontend использует только same-origin URLs.
 
-## 🎨 Compliance Specs (Telegram Sticker Bot)
+### Production
 
-* **Static Stickers**: PNG/WebP, transparent background, exactly 512px on one side (other side $\le$ 512px), file size $\le$ 512 KB.
-* **Animated Stickers**: VP9 WebM, transparent background, no audio, exactly 512px on one side, framerate $\le$ 30 FPS, duration $\le$ 3.0 seconds, file size $\le$ 256 KB.
+```powershell
+npm run build
+npm start
+```
+
+Открывайте адрес, который выводит backend при старте. Не меняйте loopback binding на `0.0.0.0` и не публикуйте сервер в LAN/Internet.
+
+## Основной поток: ручной импорт
+
+1. Запустите приложение и дождитесь статуса **Offline mode · manual import**.
+2. Перетащите `png`, `jpg`, `webp`, `gif`, `tif`, `avif`, `mp4`, `webm`, `mov`, `mkv` или `m4v` в область импорта.
+3. При необходимости выберите временной диапазон анимации, добавьте теги или откройте Canvas Editor.
+4. Конвертируйте и скачайте результат либо откройте server-reported output path.
+5. Загружайте файлы в Telegram вручную через официальный `@Stickers`; проект не использует Telegram API.
+
+Ручной импорт не обращается к TikTok и не расходует DevTools capture budget.
+
+## Опциональный live-поток через DevTools
+
+### Настройка расширения
+
+1. Откройте `chrome://extensions`, включите Developer mode и выберите **Load unpacked** → `extension/`.
+2. Откройте popup расширения. При первой установке token генерируется локально; скопируйте его в `INGEST_TOKEN` файла `.env` и перезапустите backend.
+3. Оставьте server URL равным `http://127.0.0.1:3001` или `http://localhost:3001`.
+4. Popup отдельно показывает состояние DevTools listener, localhost server и durable retry queue.
+
+### Захват
+
+1. Откройте TikTok Messages обычным способом.
+2. До появления нужного стикера откройте Chrome DevTools.
+3. Выберите панель **Sticker Capture** и оставьте её открытой.
+4. Расширение проверяет завершившиеся network responses, читает уже доступное тело через DevTools API и отправляет байты только в loopback backend.
+5. При временной localhost-ошибке payload остаётся в локальной очереди до подтверждённого ACK. Повторных TikTok/CDN-запросов нет.
+
+Backend не может достоверно определить, открыта ли панель DevTools прямо сейчас. Поэтому dashboard показывает `awaiting`, последнее подтверждённое принятие или ошибку локальной доставки, а фактический listener state смотрите в popup расширения.
+
+Расширение не кликает, не скроллит и не изменяет TikTok UI; в manifest нет content script, `debugger`, `tabs` или `webRequest` permissions. Тем не менее live-capture остаётся неофициальной инструментализацией с остаточным account/policy risk. Подробнее: [Account Safety](docs/ACCOUNT_SAFETY.md).
+
+## HAR и официальный экспорт
+
+Импорт HAR пока не считается поддерживаемой возможностью: сначала нужен небольшой sanitized HAR, подтверждающий, что Chrome действительно включил media response bodies нужных стикеров. Даже sanitized HAR может содержать чувствительные URL, тела ответов и фрагменты переписки — не сохраняйте его в Git и удаляйте после локальной проверки.
+
+TikTok Data Portability/Download Your Data можно исследовать отдельно, но текущая документация Direct Messages не гарантирует media bytes стикеров. Эта возможность не является частью runtime приложения.
+
+## Библиотека и archive snapshots
+
+Кнопка **Create archive snapshot** вызывает `POST /api/library/archive`. Сервер копирует текущие database/media files и manifest с SHA-256 в датированный каталог `output/archives/`. Активная библиотека остаётся на месте и продолжает работать.
+
+Web API не предоставляет физическое удаление всей библиотеки. Перед ручным удалением сначала создайте snapshot и проверьте manifest.
+
+## Проверки
+
+```powershell
+npm run check
+```
+
+Команда запускает backend/unit tests, frontend lint и production build. Для точечной проверки доступны:
+
+```powershell
+npm test
+npm run lint
+npm run build
+```
+
+Live-приёмка выполняется вручную и только после локальных тестов: открыть DevTools до загрузки одного статического и одного анимированного тестового стикера, затем убедиться в Chrome Network, что расширение не создало дополнительных запросов к TikTok/CDN.
+
+## Основные API
+
+Dashboard сначала вызывает `GET /api/session`; сервер устанавливает HttpOnly `SameSite=Strict` cookie. Следующие dashboard API и `/ws` используют эту same-origin session. Extension использует отдельный Bearer token.
+
+| Метод | Путь | Назначение |
+|---|---|---|
+| `GET` | `/api/session` | Создать/обновить dashboard session, вернуть status и output paths |
+| `GET` | `/api/status` | Проверить loopback server и capture/storage health |
+| `POST` | `/api/ingest` | Принять bytes от DevTools extension; Bearer token обязателен |
+| `POST` | `/api/import/files` | Локальный ручной импорт media |
+| `POST` | `/api/session/reset` | Начать новый DevTools capture budget |
+| `POST` | `/api/library/archive` | Создать неизменяемый snapshot библиотеки |
+| `GET` | `/api/stickers` | Получить записи библиотеки |
+| `POST` | `/api/convert` | Конвертировать стикер в формат Telegram |
+
+## Форматы Telegram
+
+- Static: WebP, прозрачность, одна сторона 512 px, вторая не больше 512 px, до 512 KiB.
+- Video sticker: VP9 WebM, прозрачность, без аудио, одна сторона 512 px, до 30 FPS, до 3 секунд, до 256 KiB.
+
+Backend обязан проверять фактический итоговый размер; превышение лимита не должно получать статус `converted`.
+
+## Структура
+
+```text
+extension/             DevTools network-body capture, popup и durable localhost queue
+frontend/              React/Vite dashboard
+lib/                   URL/media policy, storage, import и safety helpers
+output/                captured, statics, animated, archives и database
+README.md              запуск и архитектура
+docs/ACCOUNT_SAFETY.md подробная модель риска
+server.js              loopback HTTP/WebSocket API и media pipeline
+```
+
+Проект работает только локально и не публикует стикеры автоматически ни в TikTok, ни в Telegram.

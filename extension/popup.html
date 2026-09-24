@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sticker Capture</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <h1>DevTools Sticker Capture</h1>
+    <p class="sub">Local delivery only. No TikTok refetch or page automation.</p>
+  </header>
+
+  <section class="card status" aria-live="polite">
+    <div class="row">
+      <span>DevTools listener</span>
+      <strong id="listenerState">Checking...</strong>
+    </div>
+    <div class="row">
+      <span>Local server</span>
+      <strong id="serverState">Checking...</strong>
+    </div>
+    <div class="row">
+      <span>Durable queue</span>
+      <strong id="queueState">0</strong>
+    </div>
+    <p id="lastEvent" class="event">No activity yet.</p>
+  </section>
+
+  <section class="card">
+    <label class="toggle-row">
+      <span>Capture enabled</span>
+      <input type="checkbox" id="captureEnabled" />
+    </label>
+
+    <label class="field">
+      Local server
+      <input
+        type="url"
+        id="serverUrl"
+        value="http://127.0.0.1:3001"
+        spellcheck="false"
+      />
+    </label>
+
+    <label class="field">
+      Bearer token
+      <input
+        type="password"
+        id="ingestToken"
+        autocomplete="off"
+        spellcheck="false"
+      />
+    </label>
+
+    <div class="button-row">
+      <button id="generateToken" type="button" class="secondary">Generate</button>
+      <button id="copyToken" type="button" class="secondary">Copy</button>
+    </div>
+    <button id="saveSettings" type="button">Save and reconnect</button>
+    <button id="retryQueue" type="button" class="secondary full">
+      Retry blocked items
+    </button>
+    <p id="message" class="message" hidden></p>
+  </section>
+
+  <section class="tips">
+    <p>1. Set the same token as <code>INGEST_TOKEN</code> on the server.</p>
+    <p>2. Open TikTok Messages, then open Chrome DevTools.</p>
+    <p>3. Select the <strong>Sticker Capture</strong> DevTools panel.</p>
+    <p>4. Only responses loaded after DevTools opens can be captured.</p>
+  </section>
+
+  <script src="popup.js"></script>
+</body>
+</html>

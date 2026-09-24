@@ -1,1370 +1,1522 @@
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
-const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
 const sharp = require('sharp');
-const ffmpegPath = require('ffmpeg-static');
-const CDP = require('chrome-remote-interface');
+const multer = require('multer');
 const conversionQueue = require('./ConversionQueue');
-
-// Load environment variables (optional)
-require('dotenv').config();
+const {
+  ANIMATED_SIZE_LIMIT,
+  MAX_DURATION_MS,
+  STATIC_SIZE_LIMIT,
+  compressAnimatedWebM,
+  compressStaticSticker,
+  computeTargetDimensions,
+  createJobDirectory,
+  escapeXml,
+  normalizeFrameDelays,
+  normalizeTransforms,
+  selectFrameRange
+} = require('./lib/conversion');
+const SessionBudget = require('./lib/sessionBudget');
+const { normalizeFileToWebp, isSupportedFilename } = require('./lib/manualImport');
+const {
+  loadStickerPolicy,
+  validateStickerUrl,
+  validateStickerPayload,
+  detectMimeType,
+  decodeBase64Strict,
+  normalizeMimeType
+} = require('./lib/stickerPolicy');
+const {
+  StickerDatabase,
+  reconcileStorage,
+  resolveUnder
+} = require('./lib/stickerDatabase');
+const { createLibraryArchiveSnapshot } = require('./lib/libraryArchive');
+const { createLocalSecurity, isExtensionOrigin } = require('./lib/localSecurity');
+const {
+  HOST,
+  PORT,
+  captureMode,
+  INGEST_TOKEN,
+  OUTPUT_DIR: CONFIG_OUTPUT_DIR,
+  TEMP_DIR: CONFIG_TEMP_DIR,
+  DASHBOARD_ORIGINS,
+  MAX_DECODED_PIXELS,
+  MANUAL_FILE_MAX_BYTES,
+  MANUAL_REQUEST_MAX_BYTES,
+  HAR_MAX_BYTES,
+  SESSION_MAX_CAPTURES,
+  SESSION_MAX_MS,
+  CAPTURE_MIN_INTERVAL_MS,
+  CAPTURE_JITTER_MS,
+  INGEST_RATE_WINDOW_MS,
+  INGEST_RATE_MAX
+} = require('./lib/config');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+const security = createLocalSecurity({
+  ingestToken: INGEST_TOKEN,
+  dashboardOrigins: DASHBOARD_ORIGINS
+});
+const stickerPolicy = loadStickerPolicy();
 
-// Helper for dates in YYYY-MM-DD format
+app.disable('x-powered-by');
+app.use(security.originMiddleware);
+app.use(express.json({ limit: Math.ceil(stickerPolicy.maxBodyBytes * 4 / 3) + 64 * 1024 }));
+
 function getTodayDateStr() {
   return new Date().toISOString().split('T')[0];
 }
 
-// Directories setup
-const OUTPUT_DIR = path.join(__dirname, 'output');
-const TEMP_DIR = path.join(__dirname, 'temp');
+const OUTPUT_DIR = path.resolve(CONFIG_OUTPUT_DIR || path.join(__dirname, 'output'));
+const TEMP_DIR = path.resolve(CONFIG_TEMP_DIR || path.join(__dirname, 'temp'));
+const UPLOAD_DIR = resolveUnder(TEMP_DIR, 'uploads');
+const HAR_UPLOAD_DIR = resolveUnder(TEMP_DIR, 'har-uploads');
+const ARCHIVES_DIR = resolveUnder(OUTPUT_DIR, 'archives');
 
 function getCapturedDir(dateStr = getTodayDateStr()) {
-  const dir = path.join(OUTPUT_DIR, 'captured', dateStr);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const dir = resolveUnder(OUTPUT_DIR, path.join('captured', dateStr));
+  fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
 
 function getStaticsDir(dateStr = getTodayDateStr()) {
-  const dir = path.join(OUTPUT_DIR, 'statics', dateStr);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const dir = resolveUnder(OUTPUT_DIR, path.join('statics', dateStr));
+  fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
 
 function getAnimatedDir(dateStr = getTodayDateStr()) {
-  const dir = path.join(OUTPUT_DIR, 'animated', dateStr);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const dir = resolveUnder(OUTPUT_DIR, path.join('animated', dateStr));
+  fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
 
-// Create initial base folders
-[OUTPUT_DIR, TEMP_DIR].forEach(dir => {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+for (const directory of [OUTPUT_DIR, TEMP_DIR, UPLOAD_DIR, HAR_UPLOAD_DIR, ARCHIVES_DIR]) {
+  fs.mkdirSync(directory, { recursive: true });
+}
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, callback) => callback(null, UPLOAD_DIR),
+    filename: (_req, file, callback) => {
+      const safeExtension = path.extname(file.originalname).toLowerCase().replace(/[^a-z0-9.]/g, '');
+      callback(null, `upload_${crypto.randomBytes(12).toString('hex')}${safeExtension}`);
+    }
+  }),
+  limits: { fileSize: MANUAL_FILE_MAX_BYTES, files: 30 },
+  fileFilter: (_req, file, callback) => {
+    if (isSupportedFilename(file.originalname)) callback(null, true);
+    else callback(new Error(`Unsupported file type: ${file.originalname}`));
   }
 });
 
-// Serve captured and converted stickers for preview (supporting subfolders)
-app.use('/captured', express.static(path.join(OUTPUT_DIR, 'captured')));
-app.use('/statics', express.static(path.join(OUTPUT_DIR, 'statics')));
-app.use('/animated', express.static(path.join(OUTPUT_DIR, 'animated')));
+const harUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, callback) => callback(null, HAR_UPLOAD_DIR),
+    filename: (_req, _file, callback) =>
+      callback(null, `har_${crypto.randomBytes(12).toString('hex')}.json`)
+  }),
+  limits: { fileSize: HAR_MAX_BYTES, files: 1 },
+  fileFilter: (_req, file, callback) => {
+    const extension = path.extname(file.originalname).toLowerCase();
+    if (extension === '.har' || extension === '.json') callback(null, true);
+    else callback(new Error('HAR import accepts only .har or .json files.'));
+  }
+});
 
-// Create HTTP and WebSocket Server
+function cleanupUploadFiles(files) {
+  for (const file of files || []) {
+    if (!file || !file.path) continue;
+    try {
+      const relative = path.relative(TEMP_DIR, path.resolve(file.path));
+      const resolved = resolveUnder(TEMP_DIR, relative);
+      if (fs.existsSync(resolved)) fs.unlinkSync(resolved);
+    } catch (_) {
+      // Health reporting exposes any file that could not be removed.
+    }
+  }
+}
+
+app.use(
+  '/captured',
+  security.requireDashboard,
+  express.static(path.join(OUTPUT_DIR, 'captured'), { fallthrough: false })
+);
+app.use(
+  '/statics',
+  security.requireDashboard,
+  express.static(path.join(OUTPUT_DIR, 'statics'), { fallthrough: false })
+);
+app.use(
+  '/animated',
+  security.requireDashboard,
+  express.static(path.join(OUTPUT_DIR, 'animated'), { fallthrough: false })
+);
+
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocket.Server({ noServer: true });
 
 // Application State
-let cdpClient = null;
-let cdpConnecting = false;
-let chromeConnected = false;
-let tiktokTabFound = false;
-let capturedStickers = []; // Stores list of metadata
+let lastIngestAt = null;
+let lastIngestSource = null;
+let lastIngestError = null;
+let capturedStickers = [];
 const dbPath = path.join(OUTPUT_DIR, 'stickers_db.json');
+const database = new StickerDatabase(dbPath);
+let storageHealth = null;
 
-// Load database if exists
-if (fs.existsSync(dbPath)) {
-  try {
-    capturedStickers = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
-    // Database Migration: Ensure capturedDate exists for all legacy entries
-    let migrated = false;
-    capturedStickers = capturedStickers.map(s => {
-      if (!s.capturedDate) {
-        s.capturedDate = s.capturedAt ? s.capturedAt.split('T')[0] : getTodayDateStr();
-        migrated = true;
-      }
-      return s;
-    });
-    if (migrated) {
-      console.log('[Database] Migrated legacy database entries to include capturedDate.');
-      saveDatabase();
-    }
-  } catch (err) {
-    console.error('Failed to parse stickers database, starting fresh:', err);
-  }
-}
+const loadedDatabase = database.load();
+capturedStickers = loadedDatabase.stickers;
+const initialReconciliation = reconcileStorage(capturedStickers, {
+  outputDir: OUTPUT_DIR,
+  tempDir: TEMP_DIR
+});
+storageHealth = {
+  ...initialReconciliation.report,
+  recoveredFromBackup: loadedDatabase.recoveredFromBackup
+};
+if (loadedDatabase.changed || initialReconciliation.changed) database.save(capturedStickers);
 
 function saveDatabase() {
-  fs.writeFileSync(dbPath, JSON.stringify(capturedStickers, null, 2), 'utf8');
+  database.save(capturedStickers);
 }
 
-// Broadcast WebSocket message to all connected frontend clients
+function refreshStorageHealth() {
+  const reconciliation = reconcileStorage(capturedStickers, {
+    outputDir: OUTPUT_DIR,
+    tempDir: TEMP_DIR
+  });
+  storageHealth = {
+    ...reconciliation.report,
+    recoveredFromBackup: Boolean(storageHealth && storageHealth.recoveredFromBackup)
+  };
+  if (reconciliation.changed) saveDatabase();
+  return storageHealth;
+}
+
 function broadcast(message) {
   const payload = JSON.stringify(message);
-  wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(payload);
-    }
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) client.send(payload);
   });
 }
 
-// Check Chrome connection status and broadcast
+function getStatusPayload() {
+  const accepted = Boolean(lastIngestAt);
+  return {
+    captureMode,
+    devtools: {
+      enabled: Boolean(INGEST_TOKEN),
+      state: !INGEST_TOKEN ? 'disabled' : lastIngestError ? 'local_delivery_failed' : accepted ? 'last_asset_accepted' : 'awaiting_devtools',
+      listening: null,
+      requiresDevToolsOpen: true,
+      lastAcceptedAt: lastIngestAt,
+      lastIngestAt,
+      lastError: lastIngestError
+    },
+    session: sessionBudget.snapshot(),
+    lastIngestAt,
+    lastIngestSource,
+    stickerCount: capturedStickers.length,
+    storage: storageHealth
+  };
+}
+
+function getOutputPaths() {
+  return {
+    root: OUTPUT_DIR,
+    captured: path.join(OUTPUT_DIR, 'captured'),
+    statics: path.join(OUTPUT_DIR, 'statics'),
+    animated: path.join(OUTPUT_DIR, 'animated'),
+    archives: ARCHIVES_DIR
+  };
+}
+
 function emitStatus() {
-  broadcast({
-    type: 'status',
-    data: {
-      chromeConnected,
-      tiktokTabFound,
-      cdpConnecting
-    }
-  });
+  broadcast({ type: 'status', data: getStatusPayload() });
 }
 
-// Process and download sticker from a given URL with SHA-256 de-duplication
-async function processCapturedStickerUrl(url) {
-  if (!url) return null;
-  
-  try {
-    // 1. Download the sticker from the TikTok CDN
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      }
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch image from CDN. HTTP Status: ${response.status}`);
-    }
-
-    const arrayBuffer = await response.arrayBuffer();
-    const fileBuffer = Buffer.from(arrayBuffer);
-
-    if (!fileBuffer || fileBuffer.length === 0) {
-      throw new Error('Empty file buffer received.');
-    }
-
-    // 2. Calculate SHA-256 for duplicate prevention
-    const sha256 = crypto.createHash('sha256').update(fileBuffer).digest('hex');
-    const existing = capturedStickers.find(s => s.id === sha256);
-    if (existing) {
-      console.log(`[Duplicate Prevented] Sticker already captured with ID ${sha256}`);
-      return existing;
-    }
-
-    // 3. Save raw webp in date-based captured folder
-    const today = getTodayDateStr();
-    const currentCapturedDir = getCapturedDir(today);
-    const filename = `sticker_${sha256}.webp`;
-    const filepath = path.join(currentCapturedDir, filename);
-    fs.writeFileSync(filepath, fileBuffer);
-
-    // 4. Extract metadata using Sharp
-    const sharpImg = sharp(filepath, { animated: true });
-    const metadata = await sharpImg.metadata();
-    const isAnimated = metadata.pages > 1;
-
-    let delayVal = 40; // Default to 25 FPS
-    if (metadata.delay) {
-      delayVal = Array.isArray(metadata.delay) ? metadata.delay[0] : metadata.delay;
-    }
-
-    const newSticker = {
-      id: sha256,
-      originalUrl: url,
-      isAnimated,
-      capturedAt: new Date().toISOString(),
-      capturedDate: today,
-      width: metadata.width,
-      height: metadata.pageHeight || metadata.height,
-      frames: metadata.pages || 1,
-      delay: delayVal,
-      originalFilename: filename,
-      convertedPath: null, // Filled on conversion
-      convertedFilename: null,
-      status: 'captured', // 'captured' | 'converting' | 'converted' | 'failed'
-      tags: []
-    };
-
-    capturedStickers.unshift(newSticker);
-    saveDatabase();
-
-    console.log(`[Sticker Saved] ${isAnimated ? 'Animated' : 'Static'} sticker stored with ID: ${sha256}`);
-
-    // 5. Broadcast to all active WebSocket frontend clients
-    broadcast({
-      type: 'new_sticker',
-      data: newSticker
-    });
-
-    return newSticker;
-  } catch (err) {
-    console.error('[Sticker Capture Error] Failed to process URL:', err.message);
-    return null;
-  }
-}
-
-// Poll Chrome Remote Debugging port and manage connection
-async function manageChromeConnection() {
-  if (chromeConnected || cdpConnecting) return;
-
-  cdpConnecting = true;
-  emitStatus();
-
-  try {
-    // 1. Get list of tabs from Chrome DevTools debugging port
-    const tabs = await CDP.List({ port: 9222 });
-    
-    // 2. Search for a TikTok tab (messages or chats page preferred)
-    const tiktokTab = tabs.find(tab => 
-      tab.url && (tab.url.includes('tiktok.com') || tab.url.includes('tiktokv.com'))
-    );
-
-    if (tiktokTab) {
-      tiktokTabFound = true;
-      console.log(`[CDP] TikTok tab found: "${tiktokTab.title}" at URL: ${tiktokTab.url}`);
-      
-      // 3. Connect to the specific TikTok tab
-      cdpClient = await CDP({ target: tiktokTab, port: 9222 });
-      chromeConnected = true;
-      cdpConnecting = false;
-      console.log(`[CDP] Connected to Chrome tab successfully!`);
-      emitStatus();
-
-      // Handle disconnect
-      cdpClient.on('disconnect', () => {
-        console.log('[CDP] Disconnected from Chrome.');
-        chromeConnected = false;
-        tiktokTabFound = false;
-        cdpClient = null;
-        emitStatus();
-      });
-
-      // Enable Network, Page, and Runtime domains
-      const { Network, Page, Runtime } = cdpClient;
-      await Promise.all([
-        Network.enable(),
-        Page.enable(),
-        Runtime.enable()
-      ]);
-
-      // 4. Add the native Runtime binding function
-      await Runtime.addBinding({ name: 'captureTiktokSticker' });
-
-      // Listen to binding calls
-      Runtime.bindingCalled(async (params) => {
-        if (params.name === 'captureTiktokSticker') {
-          const url = params.payload;
-          console.log(`[CDP Binding Intercept] Received URL: ${url}`);
-          await processCapturedStickerUrl(url);
-        }
-      });
-
-      console.log('[CDP] Monitoring network requests and injecting DOM MutationObserver...');
-
-      // 5. Intercept finished network responses as a secondary fallback
-      Network.responseReceived(async (params) => {
-        try {
-          const { response } = params;
-          const url = response.url;
-          const mimeType = response.mimeType || '';
-
-          const isStickerUrl = url.includes('sticker') || url.includes('stickers');
-          const isWebpMime = mimeType.includes('webp') || url.includes('.webp');
-
-          if (isStickerUrl && isWebpMime) {
-            console.log(`[Network Intercept Fallback] Intercepted URL: ${url}`);
-            await processCapturedStickerUrl(url);
-          }
-        } catch (err) {
-          // Ignore background parsing errors for fallbacks
-        }
-      });
-
-      // 6. Formulate the DOM MutationObserver and Floating Sidebar Mini-App Script
-      const observerScript = `
-        (function() {
-          if (window.__tiktokStickerGrabberActive) return;
-          window.__tiktokStickerGrabberActive = true;
-
-          console.log("%c[Sticker Grabber Injected] Tracking DOM mutations and injecting Companion...", "color: #06b6d4; font-weight: bold;");
-
-          // ----------------------------------------------------
-          // Part A: CSS Injected Stylesheet
-          // ----------------------------------------------------
-          const sidebarCss = \`
-            #tiktok-sticker-companion-widget {
-              position: fixed;
-              bottom: 24px;
-              right: 24px;
-              width: 52px;
-              height: 52px;
-              border-radius: 50%;
-              background: linear-gradient(135deg, #d946ef, #06b6d4);
-              box-shadow: 0 0 15px rgba(217, 70, 239, 0.7);
-              cursor: pointer;
-              z-index: 2147483647;
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-              color: white;
-              font-size: 22px;
-              font-family: Arial, sans-serif;
-              user-select: none;
-              border: 2px solid rgba(255, 255, 255, 0.2);
-            }
-            #tiktok-sticker-companion-widget:hover {
-              transform: scale(1.1) rotate(15deg);
-              box-shadow: 0 0 20px rgba(6, 182, 212, 0.9);
-            }
-            #tiktok-sticker-companion-sidebar {
-              position: fixed;
-              top: 0;
-              right: -340px;
-              width: 320px;
-              height: 100vh;
-              background: rgba(13, 10, 18, 0.96);
-              border-left: 2px solid #d946ef;
-              box-shadow: -10px 0 30px rgba(0, 0, 0, 0.95);
-              z-index: 2147483646;
-              transition: right 0.4s cubic-bezier(0.16, 1, 0.3, 1);
-              font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-              color: #e2e8f0;
-              display: flex;
-              flex-direction: column;
-              text-align: left;
-            }
-            #tiktok-sticker-companion-sidebar.open {
-              right: 0;
-            }
-            .companion-header {
-              padding: 20px;
-              border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-              display: flex;
-              align-items: center;
-              justify-content: space-between;
-              background: rgba(255, 255, 255, 0.01);
-            }
-            .companion-title {
-              font-size: 15px;
-              font-weight: 800;
-              letter-spacing: 0.5px;
-              background: linear-gradient(to right, #06b6d4, #d946ef);
-              -webkit-background-clip: text;
-              -webkit-text-fill-color: transparent;
-            }
-            .companion-close {
-              cursor: pointer;
-              color: #a0aec0;
-              font-size: 24px;
-              line-height: 1;
-              transition: color 0.2s;
-            }
-            .companion-close:hover {
-              color: #fff;
-            }
-            .companion-feed {
-              flex: 1;
-              overflow-y: auto;
-              padding: 16px;
-              display: flex;
-              flex-direction: column;
-              gap: 12px;
-            }
-            .companion-card {
-              background: rgba(255, 255, 255, 0.03);
-              border: 1px solid rgba(255, 255, 255, 0.06);
-              border-radius: 10px;
-              padding: 12px;
-              display: flex;
-              gap: 12px;
-              align-items: center;
-              position: relative;
-              box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            }
-            .companion-card img {
-              width: 58px;
-              height: 58px;
-              object-fit: contain;
-              background: rgba(0, 0, 0, 0.4);
-              border-radius: 8px;
-              border: 1px solid rgba(255, 255, 255, 0.05);
-            }
-            .companion-card-info {
-              flex: 1;
-              font-size: 11px;
-              color: #cbd5e0;
-              line-height: 1.4;
-            }
-            .companion-card-actions {
-              display: flex;
-              flex-direction: column;
-              justify-content: center;
-            }
-            .companion-btn {
-              padding: 6px 12px;
-              font-size: 10px;
-              font-weight: 700;
-              border: 1px solid transparent;
-              border-radius: 6px;
-              cursor: pointer;
-              text-align: center;
-              text-decoration: none;
-              transition: all 0.2s;
-            }
-            .companion-btn-primary {
-              background: rgba(6, 182, 212, 0.15);
-              color: #22d3ee;
-              border-color: rgba(6, 182, 212, 0.3);
-            }
-            .companion-btn-primary:hover {
-              background: #06b6d4;
-              color: white;
-            }
-            .companion-btn-success {
-              background: rgba(16, 185, 129, 0.15);
-              color: #34d399;
-              border-color: rgba(16, 185, 129, 0.3);
-            }
-            .companion-btn-success:hover {
-              background: #10b981;
-              color: white;
-            }
-            .companion-status-badge {
-              position: absolute;
-              top: 8px;
-              right: 8px;
-              font-size: 8px;
-              padding: 2px 5px;
-              border-radius: 4px;
-              font-weight: 700;
-              letter-spacing: 0.5px;
-            }
-            .status-captured { background: rgba(6, 182, 212, 0.12); color: #22d3ee; }
-            .status-converting { background: rgba(217, 70, 239, 0.12); color: #f472b6; }
-            .status-converted { background: rgba(16, 185, 129, 0.12); color: #34d399; }
-            .status-failed { background: rgba(239, 68, 68, 0.12); color: #f87171; }
-          \`;
-
-          const styleEl = document.createElement('style');
-          styleEl.textContent = sidebarCss;
-          document.head.appendChild(styleEl);
-
-          // ----------------------------------------------------
-          // Part B: HTML Overlay Creation
-          // ----------------------------------------------------
-          const widget = document.createElement('div');
-          widget.id = 'tiktok-sticker-companion-widget';
-          widget.title = 'Open Sticker Companion Drawer';
-          widget.innerHTML = '⚡';
-          document.body.appendChild(widget);
-
-          const sidebar = document.createElement('div');
-          sidebar.id = 'tiktok-sticker-companion-sidebar';
-          sidebar.innerHTML = \`
-            <div class="companion-header">
-              <span class="companion-title">💎 STICKER COMPANION</span>
-              <span class="companion-close" id="companion-close-btn">&times;</span>
-            </div>
-            <div class="companion-feed" id="companion-feed-container">
-              <div style="text-align: center; color: #718096; padding-top: 60px; font-size: 12px; font-family: sans-serif;">
-                Awaiting captures...
-              </div>
-            </div>
-          \`;
-          document.body.appendChild(sidebar);
-
-          // Open/Close toggle UI event bindings
-          widget.addEventListener('click', () => {
-            sidebar.classList.toggle('open');
-          });
-          document.getElementById('companion-close-btn').addEventListener('click', () => {
-            sidebar.classList.remove('open');
-          });
-
-          // State manager
-          let companionStickers = [];
-
-          function renderFeed() {
-            const container = document.getElementById('companion-feed-container');
-            if (companionStickers.length === 0) {
-              container.innerHTML = \`<div style="text-align: center; color: #718096; padding-top: 60px; font-size: 12px;">No stickers captured in this session.</div>\`;
-              return;
-            }
-
-            container.innerHTML = companionStickers.map(s => {
-              const isAnim = s.isAnimated;
-              const statusBadge = \`<span class="companion-status-badge status-\${s.status}">\${s.status.toUpperCase()}</span>\`;
-              
-              let actionBtn = '';
-              if (s.status === 'captured') {
-                actionBtn = \`<button class="companion-btn companion-btn-primary" onclick="window.companionConvert('\${s.id}')">Convert</button>\`;
-              } else if (s.status === 'converting') {
-                actionBtn = \`<button class="companion-btn companion-btn-primary" disabled style="opacity: 0.6; cursor: wait;">Encoding...</button>\`;
-              } else if (s.status === 'converted') {
-                const downloadUrl = \`http://localhost:3001\${s.convertedPath}\`;
-                actionBtn = \`<a class="companion-btn companion-btn-success" href="\${downloadUrl}" target="_blank" download="\${s.convertedFilename}">Download</a>\`;
-              } else {
-                actionBtn = \`<button class="companion-btn companion-btn-primary" onclick="window.companionConvert('\${s.id}')">Retry</button>\`;
-              }
-
-              const imgUrl = \`http://localhost:3001/captured/\${s.capturedDate || 'default'}/\${s.originalFilename}\`;
-              return \`
-                <div class="companion-card">
-                  \${statusBadge}
-                  <img src="\${imgUrl}" />
-                  <div class="companion-card-info">
-                    <div style="font-weight: 800; margin-bottom: 4px; color: white;">sticker_\${s.id.substring(0, 8)}</div>
-                    <div style="color: #a0aec0;">Dimensions: \${s.width}x\${s.height} px</div>
-                    <div style="margin-top: 4px; color: #d946ef; font-weight: bold;">\${isAnim ? '🎬 Animated' : '🖼️ Static'}</div>
-                  </div>
-                  <div class="companion-card-actions">
-                    \${actionBtn}
-                  </div>
-                </div>
-              \`;
-            }).join('');
-          }
-
-          // Global hook on window for companion clicks
-          window.companionConvert = async (id) => {
-            try {
-              // Optimistically set to converting
-              companionStickers = companionStickers.map(s => s.id === id ? { ...s, status: 'converting' } : s);
-              renderFeed();
-
-              const res = await fetch('http://localhost:3001/api/convert', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id })
-              });
-              const data = await res.json();
-              if (data.success) {
-                companionStickers = companionStickers.map(s => s.id === id ? { ...s, ...data.sticker } : s);
-              } else {
-                companionStickers = companionStickers.map(s => s.id === id ? { ...s, status: 'failed' } : s);
-              }
-              renderFeed();
-            } catch (e) {
-              console.error("[Companion Convert Error]", e);
-              companionStickers = companionStickers.map(s => s.id === id ? { ...s, status: 'failed' } : s);
-              renderFeed();
-            }
-          };
-
-          // Establish standard local WebSocket client
-          function connectCompanionWS() {
-            const ws = new WebSocket('ws://localhost:3001');
-            ws.onmessage = (event) => {
-              try {
-                const message = JSON.parse(event.data);
-                const { type, data } = message;
-                if (type === 'init') {
-                  companionStickers = data.stickers;
-                  renderFeed();
-                } else if (type === 'new_sticker') {
-                  if (!companionStickers.some(s => s.id === data.id)) {
-                    companionStickers.unshift(data);
-                    renderFeed();
-                    // Automatically slide open panel on new captures!
-                    sidebar.classList.add('open');
-                  }
-                } else if (type === 'sticker_update') {
-                  companionStickers = companionStickers.map(s => s.id === data.id ? { ...s, ...data } : s);
-                  renderFeed();
-                }
-              } catch (e) {}
-            };
-            ws.onclose = () => {
-              setTimeout(connectCompanionWS, 3000);
-            };
-          }
-
-          connectCompanionWS();
-
-          // ----------------------------------------------------
-          // Part C: DOM MutationObserver Interception logic
-          // ----------------------------------------------------
-          const capturedUrls = new Set();
-
-          function scanNodeForStickers(node) {
-            if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
-
-            // Search for images
-            const imgs = node.tagName === 'IMG' ? [node] : node.querySelectorAll('img');
-            imgs.forEach(img => {
-              const src = img.src || "";
-              
-              // TikTok sticker URL match criteria
-              const isSticker = src.includes('tiktokcdn.com') || 
-                                src.includes('tiktokv.com') ||
-                                src.includes('sticker') ||
-                                img.getAttribute('data-sticker') !== null;
-
-              if (isSticker && src && !capturedUrls.has(src)) {
-                capturedUrls.add(src);
-                console.log("[Mutation Grab] Found new sticker element:", src);
-
-                // Send back via CDP Runtime Binding
-                if (typeof window.captureTiktokSticker === 'function') {
-                  window.captureTiktokSticker(src);
-                } else {
-                  // Fallback: REST post
-                  fetch('http://localhost:3001/api/capture-url', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url: src })
-                  }).catch(e => {});
-                }
-              }
-            });
-          }
-
-          // Monitor subtree image creations and src loading changes
-          const observer = new MutationObserver((mutations) => {
-            for (const mutation of mutations) {
-              if (mutation.addedNodes.length > 0) {
-                mutation.addedNodes.forEach(node => scanNodeForStickers(node));
-              }
-              if (mutation.type === 'attributes' && mutation.attributeName === 'src') {
-                const target = mutation.target;
-                if (target.tagName === 'IMG') {
-                  scanNodeForStickers(target);
-                }
-              }
-            }
-          });
-
-          // Begin tracking
-          observer.observe(document.body, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ['src']
-          });
-
-          // Perform initial scan
-          scanNodeForStickers(document.body);
-        })();
-      `;
-
-      // 7. Inject to run on every new document load (for hard reloads / navigations)
-      await Page.addScriptToEvaluateOnNewDocument({
-        source: observerScript
-      });
-
-      // 8. Hot-evaluate instantly on the currently open page context (no reload required!)
-      await Runtime.evaluate({
-        expression: observerScript
-      });
-
-      console.log('[CDP] MutationObserver successfully active and hot-injected.');
-
-    } else {
-      tiktokTabFound = false;
-      chromeConnected = false;
-      cdpConnecting = false;
-      emitStatus();
-    }
-  } catch (err) {
-    // Port not open, or connection failed
-    tiktokTabFound = false;
-    chromeConnected = false;
-    cdpConnecting = false;
+const ingestTimestamps = [];
+const sessionBudget = new SessionBudget({
+  maxCaptures: SESSION_MAX_CAPTURES,
+  maxMs: SESSION_MAX_MS,
+  onExhausted: (reason) => {
+    console.warn(`[SessionBudget] Exhausted: ${reason}.`);
     emitStatus();
   }
+});
+
+let captureQueueTail = Promise.resolve();
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Start Chrome connector polling
-setInterval(manageChromeConnection, 4000);
-
-// Helper function to spawn FFmpeg
-function runFFmpeg(args) {
-  return new Promise((resolve, reject) => {
-    const process = spawn(ffmpegPath, args);
-    let stderr = '';
-    process.stderr.on('data', (d) => stderr += d.toString());
-    process.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`FFmpeg exited with code ${code}. Error: ${stderr}`));
-    });
-  });
+function captureGapMs() {
+  const jitter = CAPTURE_JITTER_MS > 0 ? Math.floor(Math.random() * (CAPTURE_JITTER_MS + 1)) : 0;
+  return CAPTURE_MIN_INTERVAL_MS + jitter;
 }
 
-/**
- * Compresses static WebP sticker to guarantee size < 512 KB using Binary Search
- */
-async function compressStaticSticker(inputPath, outputPath, targetW, targetH) {
-  const SIZE_LIMIT = 500 * 1024; // 500 KB safety limit
-  let low = 50;
-  let high = 95;
-  let optimalBuffer = null;
-  let optimalQuality = 90;
-
-  const sharpImg = sharp(inputPath).resize(targetW, targetH);
-
-  // Initial check at quality 90 with maximum effort
-  let buffer = await sharpImg.clone().webp({ quality: 90, effort: 6 }).toBuffer();
-  if (buffer.length <= SIZE_LIMIT) {
-    await fs.promises.writeFile(outputPath, buffer);
-    return { sizeKb: buffer.length / 1024, quality: 90 };
+function checkIngestRateLimit() {
+  const now = Date.now();
+  while (ingestTimestamps.length && now - ingestTimestamps[0] > INGEST_RATE_WINDOW_MS) {
+    ingestTimestamps.shift();
   }
+  if (ingestTimestamps.length >= INGEST_RATE_MAX) return false;
+  ingestTimestamps.push(now);
+  return true;
+}
 
-  // Binary search for maximum quality under the limit
-  while (low <= high) {
-    const mid = Math.floor((low + high) / 2);
-    buffer = await sharpImg.clone().webp({ quality: mid, effort: 6 }).toBuffer();
-
-    if (buffer.length <= SIZE_LIMIT) {
-      optimalBuffer = buffer;
-      optimalQuality = mid;
-      low = mid + 1; // Try to get higher quality
-    } else {
-      high = mid - 1; // Over the limit, reduce quality
+function writeFileAtomic(filePath, buffer) {
+  if (fs.existsSync(filePath)) {
+    const existingHash = crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+    const incomingHash = crypto.createHash('sha256').update(buffer).digest('hex');
+    if (existingHash !== incomingHash) {
+      throw new Error('Existing content-addressed file has different bytes.');
     }
-  }
-
-  if (!optimalBuffer) {
-    optimalBuffer = await sharpImg.clone().webp({ quality: 45, effort: 6 }).toBuffer();
-    optimalQuality = 45;
-  }
-
-  await fs.promises.writeFile(outputPath, optimalBuffer);
-  return { sizeKb: optimalBuffer.length / 1024, quality: optimalQuality };
-}
-
-/**
- * Progressive WebM compression engine guaranteeing size < 256 KB
- */
-async function compressAnimatedWebM(tempFramesDir, outputPath, targetFps, durationSec) {
-  const SIZE_LIMIT = 245 * 1024; // 245 KB safety limit
-  const maxBits = SIZE_LIMIT * 8;
-  const targetBitrate = Math.floor((maxBits / durationSec) * 0.92); // Derive average bitrate with 8% safety cushion
-
-  const baseArgs = [
-    '-y',
-    '-framerate', String(targetFps),
-    '-i', path.join(tempFramesDir, 'frame_%04d.png'),
-    '-c:v', 'libvpx-vp9',
-    '-pix_fmt', 'yuva420p',
-    '-lag-in-frames', '0',
-    '-auto-alt-ref', '0',
-    '-row-mt', '1',
-    '-an'
-  ];
-
-  // ==========================================
-  // TIER 1: FAST CQ PASS (CRF 30)
-  // ==========================================
-  console.log(`[Tier 1] Encoding fast draft at CRF 30...`);
-  const tier1Args = [
-    ...baseArgs,
-    '-crf', '30',
-    '-b:v', '0',
-    '-deadline', 'good',
-    '-cpu-used', '4',
-    outputPath
-  ];
-  await runFFmpeg(tier1Args);
-  let stats = fs.statSync(outputPath);
-  
-  if (stats.size <= SIZE_LIMIT) {
-    console.log(`[Tier 1 Success] Size: ${(stats.size / 1024).toFixed(2)} KB. Re-compiling at premium fidelity (CRF 28)...`);
-    const premiumArgs = [
-      ...baseArgs,
-      '-crf', '28',
-      '-b:v', '0',
-      '-deadline', 'good',
-      '-cpu-used', '1', // Slower, maximum density
-      outputPath
-    ];
-    await runFFmpeg(premiumArgs);
     return;
   }
 
-  // ==========================================
-  // TIER 2: STEPPED CRF REDUCTION (CRF 42)
-  // ==========================================
-  if (stats.size > SIZE_LIMIT && stats.size <= SIZE_LIMIT * 1.8) {
-    console.log(`[Tier 2] Over limit: ${(stats.size/1024).toFixed(2)} KB. Re-compressing at CRF 42...`);
-    const tier2Args = [
-      ...baseArgs,
-      '-crf', '42',
-      '-b:v', '0',
-      '-deadline', 'good',
-      '-cpu-used', '2',
-      outputPath
-    ];
-    await runFFmpeg(tier2Args);
-    stats = fs.statSync(outputPath);
-    if (stats.size <= SIZE_LIMIT) {
-      console.log(`[Tier 2 Success] Size: ${(stats.size / 1024).toFixed(2)} KB`);
-      return;
+  const temporaryPath = `${filePath}.${process.pid}.${crypto.randomBytes(5).toString('hex')}.tmp`;
+  let fd;
+  try {
+    fd = fs.openSync(temporaryPath, 'wx', 0o600);
+    fs.writeFileSync(fd, buffer);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(temporaryPath, filePath);
+  } finally {
+    if (fd !== null && fd !== undefined) {
+      try { fs.closeSync(fd); } catch (_) {}
+    }
+    if (fs.existsSync(temporaryPath)) {
+      try { fs.unlinkSync(temporaryPath); } catch (_) {}
+    }
+  }
+}
+
+async function processCapturedSticker({
+  sourceUrl,
+  buffer,
+  contentBase64,
+  mimeType,
+  source = 'devtools',
+  observedAt,
+  countsBudget = true
+}) {
+  const validated = await validateStickerPayload({
+    sourceUrl,
+    mimeType,
+    contentBase64,
+    buffer,
+    policy: stickerPolicy,
+    maxDecodedPixels: MAX_DECODED_PIXELS
+  });
+  let storedBuffer = validated.buffer;
+  let storedMetadata = validated.metadata;
+  if (validated.detectedMime !== 'image/webp') {
+    storedBuffer = await sharp(validated.buffer, {
+      animated: true,
+      limitInputPixels: MAX_DECODED_PIXELS
+    })
+      .webp({ quality: 92, effort: 4 })
+      .toBuffer();
+    storedMetadata = await validateLocalWebp(storedBuffer);
+  }
+
+  const sha256 = crypto.createHash('sha256').update(storedBuffer).digest('hex');
+  const existing = capturedStickers.find((sticker) => sticker.id === sha256);
+  if (existing) return { sticker: existing, duplicate: true };
+
+  if (countsBudget) {
+    const budget = sessionBudget.check();
+    if (!budget.ok) {
+      const error = new Error(`Session budget exhausted: ${budget.reason}.`);
+      error.code = 'SESSION_EXHAUSTED';
+      throw error;
     }
   }
 
-  // ==========================================
-  // TIER 3: STRICT TWO-PASS BITRATE CONTROL
-  // ==========================================
-  console.log(`[Tier 3] Size remains high. Executing Two-Pass Bitrate Control at ${Math.round(targetBitrate / 1000)} kbps`);
-  
-  const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
-  
-  const pass1Args = [
-    '-y',
-    '-framerate', String(targetFps),
-    '-i', path.join(tempFramesDir, 'frame_%04d.png'),
-    '-c:v', 'libvpx-vp9',
-    '-pix_fmt', 'yuva420p',
-    '-an',
-    '-b:v', `${targetBitrate}`,
-    '-speed', '4',
-    '-row-mt', '1',
-    '-lag-in-frames', '0',
-    '-auto-alt-ref', '0',
-    '-pass', '1',
-    '-f', 'null',
-    nullDevice
-  ];
+  const pages = Math.max(1, Number(storedMetadata.pages) || 1);
+  const delays = Array.isArray(storedMetadata.delay) ? storedMetadata.delay : [];
+  const capturedAt =
+    typeof observedAt === 'string' && !Number.isNaN(Date.parse(observedAt))
+      ? new Date(observedAt).toISOString()
+      : new Date().toISOString();
+  const today = getTodayDateStr();
+  const filename = `sticker_${sha256}.webp`;
+  const newSticker = {
+    id: sha256,
+    originalUrl: validated.canonicalUrl,
+    isAnimated: pages > 1,
+    capturedAt,
+    capturedDate: today,
+    width: storedMetadata.width,
+    height: storedMetadata.pageHeight || storedMetadata.height,
+    frames: pages,
+    delay: delays.length ? delays[0] : Number(storedMetadata.delay) || 40,
+    frameDelays: delays.length ? delays : undefined,
+    originalFilename: filename,
+    convertedPath: null,
+    convertedFilename: null,
+    status: 'captured',
+    tags: [],
+    captureSource: source,
+    sourceMimeType: validated.detectedMime
+  };
 
-  const pass2Args = [
-    '-y',
-    '-framerate', String(targetFps),
-    '-i', path.join(tempFramesDir, 'frame_%04d.png'),
-    '-c:v', 'libvpx-vp9',
-    '-pix_fmt', 'yuva420p',
-    '-an',
-    '-b:v', `${targetBitrate}`,
-    '-speed', '2',
-    '-row-mt', '1',
-    '-lag-in-frames', '0',
-    '-auto-alt-ref', '0',
-    '-pass', '2',
-    outputPath
-  ];
-
-  await runFFmpeg(pass1Args);
-  await runFFmpeg(pass2Args);
-
-  // Cleanup two-pass log files
-  const logFiles = fs.readdirSync(process.cwd()).filter(f => f.startsWith('ffmpeg2pass-') || f === 'vp9_parser_log.txt');
-  for (const f of logFiles) {
-    try { fs.unlinkSync(path.join(process.cwd(), f)); } catch(e) {}
+  writeFileAtomic(path.join(getCapturedDir(today), filename), storedBuffer);
+  capturedStickers.unshift(newSticker);
+  try {
+    saveDatabase();
+  } catch (error) {
+    capturedStickers.shift();
+    throw error;
   }
-  
-  stats = fs.statSync(outputPath);
-  console.log(`[Tier 3 Completed] Final WebM size: ${(stats.size / 1024).toFixed(2)} KB`);
+
+  if (countsBudget) sessionBudget.recordCapture();
+  lastIngestAt = new Date().toISOString();
+  lastIngestSource = source;
+  lastIngestError = null;
+  broadcast({ type: 'new_sticker', data: newSticker });
+  emitStatus();
+  return { sticker: newSticker, duplicate: false };
 }
+
+function enqueueCapture(options, { applyGap = true } = {}) {
+  const result = captureQueueTail.then(async () => {
+    try {
+      return await processCapturedSticker(options);
+    } finally {
+      if (applyGap) await sleep(captureGapMs());
+    }
+  });
+  captureQueueTail = result.catch(() => null);
+  return result;
+}
+
+async function validateLocalWebp(webpBuffer) {
+  if (!Buffer.isBuffer(webpBuffer) || !webpBuffer.length) throw new Error('Empty WebP buffer.');
+  if (webpBuffer.length > MANUAL_FILE_MAX_BYTES) throw new Error('Normalized WebP exceeds the file limit.');
+  if (detectMimeType(webpBuffer) !== 'image/webp') throw new Error('Normalizer did not produce WebP bytes.');
+  const metadata = await sharp(webpBuffer, {
+    animated: true,
+    limitInputPixels: MAX_DECODED_PIXELS
+  }).metadata();
+  const pages = Math.max(1, Number(metadata.pages) || 1);
+  const width = Number(metadata.width) || 0;
+  const height = Number(metadata.pageHeight || metadata.height) || 0;
+  if (!width || !height || width * height * pages > MAX_DECODED_PIXELS) {
+    throw new Error('Decoded WebP dimensions exceed the configured pixel limit.');
+  }
+  return metadata;
+}
+
+async function registerLocalSticker({
+  webpBuffer,
+  source = 'manual',
+  originalName = '',
+  notes = '',
+  sourceUrl = null,
+  observedAt = null
+}) {
+  const metadata = await validateLocalWebp(webpBuffer);
+  const sha256 = crypto.createHash('sha256').update(webpBuffer).digest('hex');
+  const existing = capturedStickers.find((sticker) => sticker.id === sha256);
+  if (existing) return { sticker: existing, duplicate: true };
+
+  const today = getTodayDateStr();
+  const filename = `sticker_${sha256}.webp`;
+  writeFileAtomic(path.join(getCapturedDir(today), filename), webpBuffer);
+  const pages = Math.max(1, Number(metadata.pages) || 1);
+  const delays = Array.isArray(metadata.delay) ? metadata.delay : [];
+  const newSticker = {
+    id: sha256,
+    originalUrl: sourceUrl || (originalName ? `manual://${path.basename(originalName)}` : `manual://${sha256}`),
+    isAnimated: pages > 1,
+    capturedAt:
+      observedAt && !Number.isNaN(Date.parse(observedAt))
+        ? new Date(observedAt).toISOString()
+        : new Date().toISOString(),
+    capturedDate: today,
+    width: metadata.width,
+    height: metadata.pageHeight || metadata.height,
+    frames: pages,
+    delay: delays.length ? delays[0] : Number(metadata.delay) || 40,
+    frameDelays: delays.length ? delays : undefined,
+    originalFilename: filename,
+    convertedPath: null,
+    convertedFilename: null,
+    status: 'captured',
+    tags: originalName ? [`import:${path.basename(originalName)}`] : [],
+    captureSource: source,
+    importNotes: notes || undefined
+  };
+
+  capturedStickers.unshift(newSticker);
+  try {
+    saveDatabase();
+  } catch (error) {
+    capturedStickers.shift();
+    throw error;
+  }
+  broadcast({ type: 'new_sticker', data: newSticker });
+  emitStatus();
+  return { sticker: newSticker, duplicate: false };
+}
+
+async function* streamHarEntries(filePath) {
+  const [
+    { parser },
+    { pick },
+    { streamArray },
+    { default: chain }
+  ] = await Promise.all([
+    import('stream-json'),
+    import('stream-json/filters/pick.js'),
+    import('stream-json/streamers/stream-array.js'),
+    import('stream-chain')
+  ]);
+
+  const pipeline = chain([
+    fs.createReadStream(filePath),
+    parser(),
+    pick({ filter: 'log.entries' }),
+    streamArray()
+  ]);
+
+  try {
+    for await (const item of pipeline) {
+      yield item.value;
+    }
+  } catch (error) {
+    throw new Error(`HAR streaming parse failed: ${error.message}`);
+  } finally {
+    pipeline.destroy();
+  }
+}
+
+async function importHarFile(filePath) {
+  const result = { accepted: 0, duplicates: 0, missingBody: 0, rejected: 0, errors: [] };
+  let index = 0;
+
+  for await (const streamedEntry of streamHarEntries(filePath)) {
+    const entry = streamedEntry || {};
+    const sourceUrl = entry.request && entry.request.url;
+    const urlValidation = validateStickerUrl(sourceUrl, stickerPolicy);
+    if (!urlValidation.ok) {
+      result.rejected += 1;
+      index += 1;
+      continue;
+    }
+
+    const content = (entry.response && entry.response.content) || {};
+    const mimeType = normalizeMimeType(content.mimeType);
+    if (!stickerPolicy.allowedMimeTypes.includes(mimeType)) {
+      result.rejected += 1;
+      index += 1;
+      continue;
+    }
+    if (typeof content.text !== 'string' || !content.text.length) {
+      result.missingBody += 1;
+      index += 1;
+      continue;
+    }
+
+    try {
+      let body;
+      if (String(content.encoding || '').toLowerCase() === 'base64') {
+        body = decodeBase64Strict(content.text, stickerPolicy.maxBodyBytes);
+      } else {
+        body = Buffer.from(content.text, 'utf8');
+        if (!body.length || body.length > stickerPolicy.maxBodyBytes) {
+          throw new Error('HAR response body is empty or too large.');
+        }
+      }
+      const imported = await enqueueCapture(
+        {
+          sourceUrl,
+          buffer: body,
+          mimeType,
+          source: 'har',
+          observedAt: entry.startedDateTime,
+          countsBudget: false
+        },
+        { applyGap: false }
+      );
+      if (imported.duplicate) result.duplicates += 1;
+      else result.accepted += 1;
+    } catch (error) {
+      result.errors.push({ entry: index, error: error.message });
+    }
+    index += 1;
+  }
+  return result;
+}
+
+function createLibraryArchive() {
+  return createLibraryArchiveSnapshot({
+    outputDir: OUTPUT_DIR,
+    archivesDir: ARCHIVES_DIR,
+    databaseFiles: [database.filePath, database.backupPath],
+    stickerCount: capturedStickers.length
+  });
+}
+
+// Conversion is implemented by lib/conversion.js.
 
 // API Endpoints
 
-// Get all captured stickers
-app.get('/api/stickers', (req, res) => {
+app.get('/api/session', (req, res) => {
+  if (req.headers.origin && !security.dashboardOrigins.has(req.headers.origin)) {
+    return res.status(403).json({ error: 'Dashboard origin rejected.' });
+  }
+  security.setDashboardCookie(res);
+  return res.json({
+    authenticated: true,
+    status: getStatusPayload(),
+    outputPaths: getOutputPaths()
+  });
+});
+
+app.get(
+  '/api/status',
+  (req, res, next) => {
+    if (isExtensionOrigin(req.headers.origin)) return security.requireExtension(req, res, next);
+    return security.requireDashboard(req, res, next);
+  },
+  (_req, res) => res.json(getStatusPayload())
+);
+
+app.post('/api/ingest', security.requireExtension, async (req, res) => {
+  if (!checkIngestRateLimit()) {
+    return res.status(429).json({ error: 'Ingest rate limit exceeded. Slow down.' });
+  }
+
+  const { source, sourceUrl, mimeType, contentBase64, observedAt } = req.body || {};
+  if (!contentBase64) {
+    return res.status(422).json({
+      error: 'contentBase64 is required. URL-only capture and server-side CDN fetch are disabled.',
+      needBuffer: true
+    });
+  }
+  if (source !== 'devtools') return res.status(400).json({ error: 'source must be "devtools".' });
+
+  try {
+    const captured = await enqueueCapture({
+      sourceUrl,
+      mimeType,
+      contentBase64,
+      observedAt,
+      source: 'devtools',
+      countsBudget: true
+    });
+    return res.json({
+      success: true,
+      duplicate: captured.duplicate,
+      sticker: captured.sticker,
+      session: sessionBudget.snapshot()
+    });
+  } catch (error) {
+    lastIngestError = error.message;
+    emitStatus();
+    if (error.code === 'SESSION_EXHAUSTED') {
+      res.setHeader('Retry-After', '60');
+      return res.status(429).json({
+        error: error.message,
+        budgetExhausted: true,
+        session: sessionBudget.snapshot()
+      });
+    }
+    const clientCodes = new Set([
+      'URL_REJECTED',
+      'MIME_REJECTED',
+      'MAGIC_MISMATCH',
+      'IMAGE_INVALID',
+      'PIXEL_LIMIT',
+      'FORMAT_MISMATCH',
+      'BODY_REJECTED'
+    ]);
+    const status = clientCodes.has(error.code) || /contentBase64|body|MIME|URL|image|pixel/i.test(error.message)
+      ? 400
+      : 500;
+    return res.status(status).json({ error: error.message });
+  }
+});
+
+app.use('/api', security.requireDashboard);
+
+app.post('/api/session/reset', (_req, res) => {
+  sessionBudget.reset();
+  lastIngestError = null;
+  emitStatus();
+  res.json({ success: true, session: sessionBudget.snapshot() });
+});
+
+app.get('/api/stickers', (_req, res) => {
   res.json(capturedStickers);
 });
 
-// Fallback REST endpoint for the injected MutationObserver
-app.post('/api/capture-url', async (req, res) => {
-  const { url } = req.body;
-  if (!url) {
-    return res.status(400).json({ error: 'URL parameter is required.' });
-  }
-
-  try {
-    console.log(`[REST Intercept] Received URL fallback: ${url}`);
-    const sticker = await processCapturedStickerUrl(url);
-    if (sticker) {
-      return res.json({ success: true, sticker });
-    } else {
-      return res.status(500).json({ error: 'Failed to process sticker URL.' });
+app.post('/api/import/files', (req, res) => {
+  upload.array('files', 30)(req, res, async (error) => {
+    if (error) {
+      cleanupUploadFiles(req.files);
+      return res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
+        error: error.message || 'Upload failed.'
+      });
     }
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
+
+    const files = req.files || [];
+    if (!files.length) {
+      return res.status(400).json({ error: 'No files uploaded. Use form field "files".' });
+    }
+    const totalBytes = files.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
+    if (totalBytes > MANUAL_REQUEST_MAX_BYTES) {
+      cleanupUploadFiles(files);
+      return res.status(413).json({ error: 'Combined upload size exceeds the request limit.' });
+    }
+
+    const results = [];
+    try {
+      for (const file of files) {
+        const entry = {
+          name: file.originalname,
+          success: false,
+          error: null,
+          sticker: null,
+          duplicate: false
+        };
+        try {
+          const normalized = await normalizeFileToWebp(file.path, file.originalname, TEMP_DIR, {
+            maxDecodedPixels: MAX_DECODED_PIXELS
+          });
+          const registered = await registerLocalSticker({
+            webpBuffer: normalized.webpBuffer,
+            source: 'manual',
+            originalName: file.originalname,
+            notes: normalized.notes
+          });
+          entry.success = true;
+          entry.sticker = registered.sticker;
+          entry.duplicate = registered.duplicate;
+        } catch (importError) {
+          entry.error = importError.message;
+        }
+        results.push(entry);
+      }
+    } finally {
+      cleanupUploadFiles(files);
+      refreshStorageHealth();
+    }
+
+    const imported = results.filter((entry) => entry.success && !entry.duplicate).length;
+    const duplicates = results.filter((entry) => entry.success && entry.duplicate).length;
+    const failed = results.filter((entry) => !entry.success).length;
+    return res.json({ success: failed === 0, imported, duplicates, failed, results });
+  });
 });
 
-// Global in-memory cache for timeline scrubbing frames
-const frameCache = new Map();
-
-// Dynamic frame extraction route with On-Demand Frame Cache (ODFC)
-app.get('/api/stickers/:id/frame/:frameIndex', async (req, res) => {
-  const { id, frameIndex } = req.params;
-  const frameIndexInt = parseInt(frameIndex);
-
-  const sticker = capturedStickers.find(s => s.id === id);
-  if (!sticker) return res.status(404).json({ error: 'Sticker not found' });
-
-  const inputPath = path.join(getCapturedDir(sticker.capturedDate), sticker.originalFilename);
-  if (!fs.existsSync(inputPath)) {
-    return res.status(404).json({ error: 'Original sticker file not found' });
-  }
-
-  // 1. Return from in-memory cache if available
-  if (frameCache.has(id)) {
-    const cachedFrames = frameCache.get(id);
-    if (cachedFrames[frameIndexInt]) {
-      res.setHeader('Content-Type', 'image/png');
-      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-      return res.send(cachedFrames[frameIndexInt]);
+app.post('/api/import/har', (req, res) => {
+  harUpload.single('file')(req, res, async (error) => {
+    if (error) {
+      cleanupUploadFiles(req.file ? [req.file] : []);
+      return res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
+        error: error.message || 'HAR upload failed.'
+      });
     }
-  }
+    if (!req.file) return res.status(400).json({ error: 'No HAR uploaded. Use form field "file".' });
 
-  // 2. Cache miss: extract all frames of this sticker concurrently
-  try {
-    const totalFrames = sticker.frames || 1;
-    console.log(`[Frame Cache Miss] Populating ODFC cache for sticker ${id} (${totalFrames} frames)...`);
-
-    const frameBuffers = new Array(totalFrames);
-    const extractionPromises = [];
-
-    for (let i = 0; i < totalFrames; i++) {
-      extractionPromises.push(
-        sharp(inputPath, { page: i })
-          .resize(160, 160, { fit: 'inside' })
-          .png()
-          .toBuffer()
-          .then(buf => {
-            frameBuffers[i] = buf;
-          })
-          .catch(err => {
-            console.error(`[ODFC] Error extracting frame ${i} for ${id}:`, err.message);
-          })
-      );
-    }
-
-    await Promise.all(extractionPromises);
-    
-    // Save to global in-memory cache
-    frameCache.set(id, frameBuffers);
-
-    if (frameBuffers[frameIndexInt]) {
-      res.setHeader('Content-Type', 'image/png');
-      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-      return res.send(frameBuffers[frameIndexInt]);
-    } else {
-      return res.status(404).json({ error: 'Frame index out of bounds' });
-    }
-  } catch (err) {
-    console.error(`[ODFC Error] Populating frames failed:`, err.message);
-    return res.status(500).json({ error: `Frame extraction failed: ${err.message}` });
-  }
-});
-
-// Clear all stickers (resets DB and recursive cleanup)
-app.post('/api/stickers/clear', (req, res) => {
-  capturedStickers = [];
-  saveDatabase();
-
-  const capturedRoot = path.join(OUTPUT_DIR, 'captured');
-  const staticsRoot = path.join(OUTPUT_DIR, 'statics');
-  const animatedRoot = path.join(OUTPUT_DIR, 'animated');
-
-  [capturedRoot, staticsRoot, animatedRoot].forEach(dir => {
-    if (fs.existsSync(dir)) {
-      try {
-        fs.rmSync(dir, { recursive: true, force: true });
-        fs.mkdirSync(dir, { recursive: true });
-      } catch (e) {}
+    try {
+      const result = await importHarFile(req.file.path);
+      refreshStorageHealth();
+      return res.json({ success: result.errors.length === 0, ...result });
+    } catch (importError) {
+      return res.status(400).json({ error: importError.message });
+    } finally {
+      cleanupUploadFiles([req.file]);
     }
   });
-
-  res.json({ success: true, message: 'All stickers cleared' });
 });
 
-// Convert sticker endpoint (supporting custom frame ranges & dynamic date paths)
-app.post('/api/convert', async (req, res) => {
-  const { id, startFrame, endFrame, startTime } = req.body;
-  if (!id) {
-    return res.status(400).json({ error: 'Sticker ID is required' });
+app.post('/api/library/archive', (_req, res) => {
+  try {
+    const archive = createLibraryArchive();
+    return res.json({ success: true, archive, status: getStatusPayload() });
+  } catch (error) {
+    return res.status(500).json({
+      error: `Archive snapshot failed; the active library was left untouched: ${error.message}`
+    });
+  }
+});
+
+// Bounded on-demand frame cache. Only the requested frame is decoded.
+const FRAME_CACHE_LIMIT = 128;
+const frameCache = new Map();
+
+function readCachedFrame(cacheKey) {
+  if (!frameCache.has(cacheKey)) return null;
+  const value = frameCache.get(cacheKey);
+  frameCache.delete(cacheKey);
+  frameCache.set(cacheKey, value);
+  return value;
+}
+
+function cacheFrame(cacheKey, buffer) {
+  if (frameCache.has(cacheKey)) frameCache.delete(cacheKey);
+  frameCache.set(cacheKey, buffer);
+  while (frameCache.size > FRAME_CACHE_LIMIT) {
+    const oldestKey = frameCache.keys().next().value;
+    frameCache.delete(oldestKey);
+  }
+}
+
+app.get('/api/stickers/:id/frame/:frameIndex', async (req, res) => {
+  const { id, frameIndex } = req.params;
+  const frameIndexInt = Number(frameIndex);
+  if (!Number.isSafeInteger(frameIndexInt) || frameIndexInt < 0) {
+    return res.status(400).json({ error: 'Frame index must be a non-negative integer.' });
   }
 
-  const stickerIndex = capturedStickers.findIndex(s => s.id === id);
-  if (stickerIndex === -1) {
-    return res.status(404).json({ error: 'Sticker not found' });
+  const sticker = capturedStickers.find((item) => item.id === id);
+  if (!sticker) return res.status(404).json({ error: 'Sticker not found.' });
+
+  const totalFrames = Math.max(1, Number(sticker.frames) || 1);
+  if (frameIndexInt >= totalFrames) {
+    return res.status(404).json({ error: 'Frame index out of bounds.' });
   }
 
-  const sticker = capturedStickers[stickerIndex];
-  const inputPath = path.join(getCapturedDir(sticker.capturedDate), sticker.originalFilename);
-
+  const inputPath = resolveUnder(
+    OUTPUT_DIR,
+    path.join('captured', sticker.capturedDate, sticker.originalFilename)
+  );
   if (!fs.existsSync(inputPath)) {
-    return res.status(404).json({ error: 'Original sticker file not found on disk' });
+    return res.status(404).json({ error: 'Original sticker file not found.' });
   }
 
-  // Update status to converting
-  sticker.status = 'converting';
-  broadcast({ type: 'sticker_update', data: sticker });
+  const cacheKey = `${id}:${frameIndexInt}`;
+  const cached = readCachedFrame(cacheKey);
+  if (cached) {
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+    return res.send(cached);
+  }
 
-  // Enqueue the CPU-bound task in the queue
-  conversionQueue.enqueue(async () => {
-    const sharpImg = sharp(inputPath, { animated: true });
-    const metadata = await sharpImg.metadata();
-    const totalFrames = metadata.pages || 1;
-    
-    // Calculate Telegram dimensions (one side exactly 512, the other <= 512)
-    const w = metadata.width;
-    const h = metadata.pageHeight || metadata.height;
-    let targetW, targetH;
+  try {
+    // Buffer input prevents libvips from retaining a Windows file handle after the response.
+    const sourceBuffer = await fs.promises.readFile(inputPath);
+    const frame = await sharp(sourceBuffer, {
+      page: frameIndexInt,
+      limitInputPixels: MAX_DECODED_PIXELS
+    })
+      .resize(160, 160, { fit: 'inside' })
+      .png()
+      .toBuffer();
+    cacheFrame(cacheKey, frame);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+    return res.send(frame);
+  } catch (error) {
+    console.error(`[Frame Extraction] ${id}:${frameIndexInt}:`, error.message);
+    return res.status(500).json({ error: `Frame extraction failed: ${error.message}` });
+  }
+});
+// Physical deletion is intentionally not exposed over HTTP.
+// Use POST /api/library/archive to create a recoverable snapshot.
 
-    if (w >= h) {
-      targetW = 512;
-      targetH = Math.round((h * 512) / w);
-    } else {
-      targetH = 512;
-      targetW = Math.round((w * 512) / h);
+// Conversion route helpers
+const CONVERSION_STATE_FIELDS = [
+  'status',
+  'convertedPath',
+  'convertedFilename',
+  'convertedAt',
+  'convertedRange',
+  'selectedRange',
+  'selectedStartTime',
+  'durationMs',
+  'durationSeconds',
+  'convertedSizeBytes',
+  'conversion',
+  'error',
+  'conversionError'
+];
+
+function conversionClientError(message, statusCode = 400) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+function requireStickerForConversion(id) {
+  if (typeof id !== 'string' || !/^[a-f0-9]{64}$/i.test(id)) {
+    throw conversionClientError('A valid sticker ID is required.');
+  }
+  const sticker = capturedStickers.find((item) => item.id === id);
+  if (!sticker) throw conversionClientError('Sticker not found.', 404);
+  return sticker;
+}
+
+function parseOptionalFinite(value, name, { integer = false, min = null, max = null } = {}) {
+  if (value === undefined || value === null || value === '') return undefined;
+  const number = Number(value);
+  if (!Number.isFinite(number)) throw conversionClientError(`${name} must be a finite number.`);
+  if (integer && !Number.isInteger(number)) throw conversionClientError(`${name} must be an integer.`);
+  if (min !== null && number < min) throw conversionClientError(`${name} must be at least ${min}.`);
+  if (max !== null && number > max) throw conversionClientError(`${name} must be at most ${max}.`);
+  return number;
+}
+
+function parseRangeRequest(body = {}) {
+  return {
+    startFrame: parseOptionalFinite(body.startFrame, 'startFrame', { integer: true, min: 0 }),
+    endFrame: parseOptionalFinite(body.endFrame, 'endFrame', { integer: true, min: 0 }),
+    startTime: parseOptionalFinite(body.startTime, 'startTime', { min: 0 })
+  };
+}
+
+function validateTransformsRequest(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw conversionClientError('transforms must be an object.');
+  }
+  for (const name of ['scale', 'rotation', 'strokeWidth', 'textSize']) {
+    if (value[name] !== undefined && !Number.isFinite(Number(value[name]))) {
+      throw conversionClientError(`transforms.${name} must be a finite number.`);
     }
+  }
+  if (value.strokeActive !== undefined && typeof value.strokeActive !== 'boolean') {
+    throw conversionClientError('transforms.strokeActive must be a boolean.');
+  }
+  for (const name of ['strokeColor', 'topText', 'bottomText', 'textColor']) {
+    if (value[name] !== undefined && typeof value[name] !== 'string') {
+      throw conversionClientError(`transforms.${name} must be a string.`);
+    }
+  }
+  return normalizeTransforms(value);
+}
 
-    const dateStr = sticker.capturedDate || getTodayDateStr();
+function cloneMetadataValue(value) {
+  if (value === undefined) return undefined;
+  return JSON.parse(JSON.stringify(value));
+}
 
+function snapshotConversionState(sticker) {
+  const snapshot = {};
+  for (const field of CONVERSION_STATE_FIELDS) {
+    snapshot[field] = Object.prototype.hasOwnProperty.call(sticker, field)
+      ? { present: true, value: cloneMetadataValue(sticker[field]) }
+      : { present: false };
+  }
+  return snapshot;
+}
+
+function restoreConversionState(sticker, snapshot) {
+  for (const field of CONVERSION_STATE_FIELDS) {
+    if (snapshot[field] && snapshot[field].present) {
+      sticker[field] = cloneMetadataValue(snapshot[field].value);
+    } else {
+      delete sticker[field];
+    }
+  }
+}
+
+function snapshotHasValidOutput(snapshot) {
+  const status = snapshot.status && snapshot.status.value;
+  const convertedPath = snapshot.convertedPath && snapshot.convertedPath.value;
+  if (status !== 'converted' || typeof convertedPath !== 'string' || !convertedPath) return false;
+  try {
+    const diskPath = resolveUnder(OUTPUT_DIR, convertedPath.replace(/^[/\\]+/, ''));
+    return fs.existsSync(diskPath) && fs.statSync(diskPath).isFile();
+  } catch (_) {
+    return false;
+  }
+}
+
+function markConversionStarted(sticker) {
+  sticker.status = 'converting';
+  delete sticker.error;
+  delete sticker.conversionError;
+  broadcast({ type: 'sticker_update', data: sticker });
+}
+
+function recordConversionFailure(sticker, snapshot, error) {
+  restoreConversionState(sticker, snapshot);
+  sticker.status = snapshotHasValidOutput(snapshot) ? 'converted' : 'failed';
+  sticker.error = error.message;
+  sticker.conversionError = {
+    message: error.message,
+    at: new Date().toISOString()
+  };
+  try {
+    saveDatabase();
+  } catch (saveError) {
+    console.error('[Conversion] Unable to persist failure state:', saveError.message);
+  }
+  broadcast({ type: 'sticker_update', data: sticker });
+}
+
+function buildRangeMetadata(allDelays, range) {
+  const startTimeMs = allDelays.slice(0, range.start).reduce((sum, delay) => sum + delay, 0);
+  return {
+    startFrame: range.start,
+    endFrame: range.end,
+    startTime: startTimeMs / 1000,
+    durationMs: range.durationMs,
+    durationSeconds: range.durationMs / 1000,
+    frameDelays: [...range.delays]
+  };
+}
+
+function buildConversionUpdates({
+  kind,
+  convertedPath,
+  convertedFilename,
+  range,
+  sizeBytes,
+  details = {}
+}) {
+  return {
+    status: 'converted',
+    convertedPath,
+    convertedFilename,
+    convertedAt: new Date().toISOString(),
+    convertedRange: cloneMetadataValue(range),
+    selectedRange: cloneMetadataValue(range),
+    selectedStartTime: range.startTime,
+    durationMs: range.durationMs,
+    durationSeconds: range.durationSeconds,
+    convertedSizeBytes: sizeBytes,
+    conversion: {
+      type: kind,
+      range: cloneMetadataValue(range),
+      startTime: range.startTime,
+      durationMs: range.durationMs,
+      durationSeconds: range.durationSeconds,
+      details
+    }
+  };
+}
+
+async function assertOutputFile(filePath, sizeLimit) {
+  const stat = await fs.promises.stat(filePath);
+  if (!stat.isFile() || stat.size <= 0) throw new Error('Converter produced an empty output file.');
+  if (stat.size > sizeLimit) {
+    throw new Error(`Converted file is ${stat.size} bytes; limit is ${sizeLimit} bytes.`);
+  }
+  return stat.size;
+}
+
+async function promoteCandidateAndPersist({
+  candidatePath,
+  outputPath,
+  sizeLimit,
+  sticker,
+  snapshot,
+  updates
+}) {
+  await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
+  await assertOutputFile(candidatePath, sizeLimit);
+
+  const stagedPath = `${outputPath}.candidate-${crypto.randomUUID()}`;
+  const previousPath = `${outputPath}.previous-${crypto.randomUUID()}`;
+  let previousMoved = false;
+  let candidatePromoted = false;
+
+  try {
+    await fs.promises.copyFile(candidatePath, stagedPath);
+    await assertOutputFile(stagedPath, sizeLimit);
+    if (fs.existsSync(outputPath)) {
+      await fs.promises.rename(outputPath, previousPath);
+      previousMoved = true;
+    }
+    await fs.promises.rename(stagedPath, outputPath);
+    candidatePromoted = true;
+
+    Object.assign(sticker, updates);
+    delete sticker.error;
+    delete sticker.conversionError;
+    saveDatabase();
+
+    if (previousMoved) await fs.promises.unlink(previousPath).catch(() => {});
+    broadcast({ type: 'sticker_update', data: sticker });
+    return sticker;
+  } catch (error) {
+    restoreConversionState(sticker, snapshot);
+    if (candidatePromoted) await fs.promises.unlink(outputPath).catch(() => {});
+    if (previousMoved && fs.existsSync(previousPath)) {
+      await fs.promises.rename(previousPath, outputPath).catch(() => {});
+    }
+    throw error;
+  } finally {
+    await fs.promises.unlink(stagedPath).catch(() => {});
+  }
+}
+
+async function runQueuedConversion(res, sticker, job) {
+  try {
+    const result = await conversionQueue.enqueue(async () => {
+      const snapshot = snapshotConversionState(sticker);
+      markConversionStarted(sticker);
+      try {
+        return await job(snapshot);
+      } catch (error) {
+        recordConversionFailure(sticker, snapshot, error);
+        throw error;
+      }
+    }, { key: sticker.id });
+    return res.json({ success: true, sticker: result });
+  } catch (error) {
+    const queueFull = error.message === 'Conversion queue is full';
+    const statusCode = queueFull ? 503 : error.statusCode || 500;
+    return res.status(statusCode).json({
+      error: queueFull ? error.message : `Conversion failed: ${error.message}`
+    });
+  }
+}
+
+async function loadConversionMetadata(inputPath) {
+  const metadata = await sharp(inputPath, {
+    animated: true,
+    limitInputPixels: MAX_DECODED_PIXELS
+  }).metadata();
+  const pages = Math.max(1, Number(metadata.pages) || 1);
+  const width = Number(metadata.width) || 0;
+  const height = Number(metadata.pageHeight || metadata.height) || 0;
+  if (!width || !height || width * height * pages > MAX_DECODED_PIXELS) {
+    throw conversionClientError('Source dimensions exceed the decoded pixel limit.');
+  }
+  return { metadata, pages, dimensions: computeTargetDimensions(width, height) };
+}
+
+function delaysForConversion(metadata, sticker, totalFrames) {
+  const source =
+    Array.isArray(metadata.delay) && metadata.delay.length
+      ? metadata.delay
+      : Array.isArray(sticker.frameDelays) && sticker.frameDelays.length
+        ? sticker.frameDelays
+        : sticker.delay;
+  return normalizeFrameDelays(source, totalFrames);
+}
+
+async function removeJobDirectory(jobDirectory) {
+  if (!jobDirectory) return;
+  await fs.promises.rm(jobDirectory, { recursive: true, force: true }).catch(() => {});
+}
+
+function decodePngDataUri(value) {
+  if (typeof value !== 'string') throw conversionClientError('pngBase64 must be a PNG data URI.');
+  const match = /^data:image\/png;base64,([A-Za-z0-9+/=\s]+)$/.exec(value);
+  if (!match) throw conversionClientError('pngBase64 must be a valid PNG data URI.');
+  let buffer;
+  try {
+    buffer = decodeBase64Strict(match[1], stickerPolicy.maxBodyBytes);
+  } catch (error) {
+    throw conversionClientError(error.message);
+  }
+  if (detectMimeType(buffer) !== 'image/png') {
+    throw conversionClientError('pngBase64 does not contain PNG bytes.');
+  }
+  return buffer;
+}
+
+// Convert sticker endpoint (supporting cumulative frame ranges)
+app.post('/api/convert', async (req, res) => {
+  let sticker;
+  let requestedRange;
+  try {
+    const body = req.body || {};
+    sticker = requireStickerForConversion(body.id);
+    requestedRange = parseRangeRequest(body);
+  } catch (error) {
+    return res.status(error.statusCode || 400).json({ error: error.message });
+  }
+
+  const inputPath = resolveUnder(
+    OUTPUT_DIR,
+    path.join('captured', sticker.capturedDate || getTodayDateStr(), sticker.originalFilename)
+  );
+  if (!fs.existsSync(inputPath)) {
+    return res.status(404).json({ error: 'Original sticker file not found on disk.' });
+  }
+
+  return runQueuedConversion(res, sticker, async (snapshot) => {
+    let jobDirectory;
+    try {
+      jobDirectory = await createJobDirectory(TEMP_DIR, 'convert', sticker.id);
+      const { metadata, pages, dimensions } = await loadConversionMetadata(inputPath);
+      const dateStr = sticker.capturedDate || getTodayDateStr();
+
+      if (pages > 1) {
+        const allDelays = delaysForConversion(metadata, sticker, pages);
+        const selected = selectFrameRange({
+          delays: allDelays,
+          ...requestedRange,
+          maxDurationMs: MAX_DURATION_MS
+        });
+        const range = buildRangeMetadata(allDelays, selected);
+
+        for (let frameIndex = selected.start; frameIndex <= selected.end; frameIndex += 1) {
+          const relativeIndex = frameIndex - selected.start;
+          const framePath = path.join(
+            jobDirectory,
+            `frame_${String(relativeIndex).padStart(4, '0')}.png`
+          );
+          await sharp(inputPath, {
+            page: frameIndex,
+            limitInputPixels: MAX_DECODED_PIXELS
+          })
+            .resize(dimensions.width, dimensions.height, { fit: 'inside' })
+            .png()
+            .toFile(framePath);
+        }
+
+        const outputFilename = `sticker_${sticker.id}.webm`;
+        const candidatePath = path.join(jobDirectory, outputFilename);
+        const compression = await compressAnimatedWebM(
+          jobDirectory,
+          candidatePath,
+          selected.delays
+        );
+        const sizeBytes = await assertOutputFile(candidatePath, ANIMATED_SIZE_LIMIT);
+        const outputPath = path.join(getAnimatedDir(dateStr), outputFilename);
+        const updates = buildConversionUpdates({
+          kind: 'animated',
+          convertedPath: `/animated/${dateStr}/${outputFilename}`,
+          convertedFilename: outputFilename,
+          range,
+          sizeBytes,
+          details: {
+            encoderMode: compression.mode,
+            sourceFrames: pages
+          }
+        });
+        return promoteCandidateAndPersist({
+          candidatePath,
+          outputPath,
+          sizeLimit: ANIMATED_SIZE_LIMIT,
+          sticker,
+          snapshot,
+          updates
+        });
+      }
+
+      if (
+        (requestedRange.startFrame !== undefined && requestedRange.startFrame !== 0) ||
+        (requestedRange.endFrame !== undefined && requestedRange.endFrame !== 0) ||
+        (requestedRange.startTime !== undefined && requestedRange.startTime !== 0)
+      ) {
+        throw conversionClientError('Static stickers only support frame 0 and startTime 0.');
+      }
+
+      const outputFilename = `sticker_${sticker.id}.webp`;
+      const candidatePath = path.join(jobDirectory, outputFilename);
+      const compression = await compressStaticSticker(
+        inputPath,
+        candidatePath,
+        dimensions.width,
+        dimensions.height
+      );
+      const sizeBytes = await assertOutputFile(candidatePath, STATIC_SIZE_LIMIT);
+      const outputPath = path.join(getStaticsDir(dateStr), outputFilename);
+      const range = {
+        startFrame: 0,
+        endFrame: 0,
+        startTime: 0,
+        durationMs: 0,
+        durationSeconds: 0,
+        frameDelays: []
+      };
+      const updates = buildConversionUpdates({
+        kind: 'static',
+        convertedPath: `/statics/${dateStr}/${outputFilename}`,
+        convertedFilename: outputFilename,
+        range,
+        sizeBytes,
+        details: { quality: compression.quality }
+      });
+      return promoteCandidateAndPersist({
+        candidatePath,
+        outputPath,
+        sizeLimit: STATIC_SIZE_LIMIT,
+        sticker,
+        snapshot,
+        updates
+      });
+    } finally {
+      await removeJobDirectory(jobDirectory);
+    }
+  });
+});
+
+// Edit and convert static sticker via a validated PNG data URI
+app.post('/api/edit-convert-static', async (req, res) => {
+  let sticker;
+  let pngBuffer;
+  let metadata;
+  try {
+    const body = req.body || {};
+    sticker = requireStickerForConversion(body.id);
     if (sticker.isAnimated) {
-      // 1. ANIMATED CONVERSION (WebP -> WebM with Offset Range Selection)
-      console.log(`[Converter] Starting animated WebP to WebM conversion for ID: ${id}`);
-      
-      const tempFramesDir = path.join(TEMP_DIR, `frames_${id}`);
-      if (fs.existsSync(tempFramesDir)) {
-        fs.rmSync(tempFramesDir, { recursive: true, force: true });
-      }
-      fs.mkdirSync(tempFramesDir, { recursive: true });
+      throw conversionClientError('Animated stickers must use /api/edit-convert-animated.');
+    }
+    pngBuffer = decodePngDataUri(body.pngBase64);
+    metadata = await sharp(pngBuffer, {
+      limitInputPixels: MAX_DECODED_PIXELS
+    }).metadata();
+    const width = Number(metadata.width) || 0;
+    const height = Number(metadata.height) || 0;
+    if (metadata.format !== 'png' || !width || !height || width * height > MAX_DECODED_PIXELS) {
+      throw conversionClientError('Edited PNG dimensions or format are invalid.');
+    }
+  } catch (error) {
+    return res.status(error.statusCode || 400).json({ error: error.message });
+  }
 
-      // Determine single frame delay list
-      let delays = metadata.delay || [];
-      if (!Array.isArray(delays)) {
-        delays = new Array(totalFrames).fill(metadata.delay || 40);
-      }
+  let jobDirectory;
+  try {
+    jobDirectory = await createJobDirectory(TEMP_DIR, 'edit-static', sticker.id);
+    const inputPath = path.join(jobDirectory, 'edited.png');
+    await fs.promises.writeFile(inputPath, pngBuffer);
+    pngBuffer = null;
 
-      const totalDurationMsAll = delays.reduce((sum, d) => sum + d, 0);
-      const originalFps = (totalFrames / totalDurationMsAll) * 1000 || 25;
+    return await runQueuedConversion(res, sticker, async (snapshot) => {
+      const dimensions = computeTargetDimensions(metadata.width, metadata.height);
+      const dateStr = sticker.capturedDate || getTodayDateStr();
+      const outputFilename = `sticker_${sticker.id}.webp`;
+      const candidatePath = path.join(jobDirectory, outputFilename);
+      const compression = await compressStaticSticker(
+        inputPath,
+        candidatePath,
+        dimensions.width,
+        dimensions.height
+      );
+      const sizeBytes = await assertOutputFile(candidatePath, STATIC_SIZE_LIMIT);
+      const range = {
+        startFrame: 0,
+        endFrame: 0,
+        startTime: 0,
+        durationMs: 0,
+        durationSeconds: 0,
+        frameDelays: []
+      };
+      const updates = buildConversionUpdates({
+        kind: 'static-edit',
+        convertedPath: `/statics/${dateStr}/${outputFilename}`,
+        convertedFilename: outputFilename,
+        range,
+        sizeBytes,
+        details: {
+          quality: compression.quality,
+          sourceWidth: metadata.width,
+          sourceHeight: metadata.height
+        }
+      });
+      return promoteCandidateAndPersist({
+        candidatePath,
+        outputPath: path.join(getStaticsDir(dateStr), outputFilename),
+        sizeLimit: STATIC_SIZE_LIMIT,
+        sticker,
+        snapshot,
+        updates
+      });
+    });
+  } catch (error) {
+    if (!res.headersSent) {
+      return res.status(error.statusCode || 500).json({ error: error.message });
+    }
+    return undefined;
+  } finally {
+    await removeJobDirectory(jobDirectory);
+  }
+});
 
-      // Compute range bounds
-      let start = 0;
-      if (startFrame !== undefined) {
-        start = Math.max(0, parseInt(startFrame));
-      } else if (startTime !== undefined) {
-        start = Math.min(totalFrames - 1, Math.round(parseFloat(startTime) * originalFps));
-      } else {
-        start = 0;
-      }
+// Edit and convert animated sticker with normalized transforms
+function colorToRgb(hex) {
+  return {
+    r: parseInt(hex.slice(1, 3), 16),
+    g: parseInt(hex.slice(3, 5), 16),
+    b: parseInt(hex.slice(5, 7), 16)
+  };
+}
 
-      let end = 0;
-      const avgDelayAll = totalDurationMsAll / totalFrames;
-      if (endFrame !== undefined) {
-        end = Math.min(totalFrames - 1, parseInt(endFrame));
-      } else {
-        // Calculate max frames for 3.0 seconds based on average delay
-        const maxFramesIn3Sec = Math.floor(3000 / avgDelayAll);
-        end = Math.min(totalFrames - 1, start + maxFramesIn3Sec - 1);
-      }
+function cleanSvgText(value) {
+  return escapeXml(String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').toUpperCase());
+}
 
-      if (start > end) {
-        throw new Error('Start frame must be less than or equal to end frame.');
-      }
+function buildTextOverlay(transforms) {
+  if (!transforms.topText && !transforms.bottomText) return null;
+  const top = transforms.topText
+    ? `<text x="256" y="60" text-anchor="middle" font-family="Impact, sans-serif" font-size="${transforms.textSize}" font-weight="bold" fill="${transforms.textColor}" stroke="#000000" stroke-width="2">${cleanSvgText(transforms.topText)}</text>`
+    : '';
+  const bottom = transforms.bottomText
+    ? `<text x="256" y="460" text-anchor="middle" font-family="Impact, sans-serif" font-size="${transforms.textSize}" font-weight="bold" fill="${transforms.textColor}" stroke="#000000" stroke-width="2">${cleanSvgText(transforms.bottomText)}</text>`
+    : '';
+  return Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512">${top}${bottom}</svg>`,
+    'utf8'
+  );
+}
 
-      const activeDelays = delays.slice(start, end + 1);
-      const totalDurationMs = activeDelays.reduce((sum, d) => sum + d, 0);
-      const durationSec = totalDurationMs / 1000;
+async function centeredCompositeLayer(input, offsetX = 0, offsetY = 0) {
+  const metadata = await sharp(input).metadata();
+  const width = Number(metadata.width) || 0;
+  const height = Number(metadata.height) || 0;
+  if (!width || !height) throw new Error('Transformed frame has invalid dimensions.');
 
-      if (totalDurationMs > 3050) {
-        throw new Error(`Trimmed range duration (${durationSec.toFixed(2)}s) exceeds Telegram 3.0s limit.`);
-      }
+  const rawLeft = Math.round((512 - width) / 2 + offsetX);
+  const rawTop = Math.round((512 - height) / 2 + offsetY);
+  const cropLeft = Math.max(0, -rawLeft);
+  const cropTop = Math.max(0, -rawTop);
+  const left = Math.max(0, rawLeft);
+  const top = Math.max(0, rawTop);
+  const visibleWidth = Math.min(width - cropLeft, 512 - left);
+  const visibleHeight = Math.min(height - cropTop, 512 - top);
+  if (visibleWidth <= 0 || visibleHeight <= 0) return null;
 
-      // Calculate Target FPS
-      const avgDelay = totalDurationMs / activeDelays.length;
-      const calculatedFps = (1000 / avgDelay) || 25;
-      const targetFps = Math.min(30, Math.round(calculatedFps));
+  let layerInput = input;
+  if (cropLeft || cropTop || visibleWidth !== width || visibleHeight !== height) {
+    layerInput = await sharp(input)
+      .extract({
+        left: cropLeft,
+        top: cropTop,
+        width: visibleWidth,
+        height: visibleHeight
+      })
+      .png()
+      .toBuffer();
+  }
+  return { input: layerInput, left, top };
+}
 
-      console.log(`[Slice Engine] Slicing range [${start} - ${end}] (${activeDelays.length} frames, ${durationSec.toFixed(2)}s at ${targetFps} FPS, from startTime ${startTime || 0}s)`);
+app.post('/api/edit-convert-animated', async (req, res) => {
+  let sticker;
+  let requestedRange;
+  let transforms;
+  try {
+    const body = req.body || {};
+    sticker = requireStickerForConversion(body.id);
+    if (!sticker.isAnimated) {
+      throw conversionClientError('Static stickers must use /api/edit-convert-static.');
+    }
+    requestedRange = parseRangeRequest(body);
+    transforms = validateTransformsRequest(body.transforms);
+  } catch (error) {
+    return res.status(error.statusCode || 400).json({ error: error.message });
+  }
 
-      // Extract frames sequentially
-      for (let i = start; i <= end; i++) {
-        const relativeIndex = i - start;
-        const framePath = path.join(tempFramesDir, `frame_${String(relativeIndex).padStart(4, '0')}.png`);
-        
-        await sharp(inputPath, { page: i })
-          .resize(targetW, targetH)
+  const inputPath = resolveUnder(
+    OUTPUT_DIR,
+    path.join('captured', sticker.capturedDate || getTodayDateStr(), sticker.originalFilename)
+  );
+  if (!fs.existsSync(inputPath)) {
+    return res.status(404).json({ error: 'Original sticker not found.' });
+  }
+
+  return runQueuedConversion(res, sticker, async (snapshot) => {
+    let jobDirectory;
+    try {
+      jobDirectory = await createJobDirectory(TEMP_DIR, 'edit-animated', sticker.id);
+      const { metadata, pages, dimensions } = await loadConversionMetadata(inputPath);
+      if (pages <= 1) throw conversionClientError('Source does not contain multiple animation frames.');
+
+      const allDelays = delaysForConversion(metadata, sticker, pages);
+      const selected = selectFrameRange({
+        delays: allDelays,
+        ...requestedRange,
+        maxDurationMs: MAX_DURATION_MS
+      });
+      const range = buildRangeMetadata(allDelays, selected);
+      const textOverlay = buildTextOverlay(transforms);
+      const scaledWidth = Math.max(1, Math.round(dimensions.width * transforms.scale));
+      const scaledHeight = Math.max(1, Math.round(dimensions.height * transforms.scale));
+
+      for (let frameIndex = selected.start; frameIndex <= selected.end; frameIndex += 1) {
+        const relativeIndex = frameIndex - selected.start;
+        const framePath = path.join(
+          jobDirectory,
+          `frame_${String(relativeIndex).padStart(4, '0')}.png`
+        );
+
+        const transformedFrame = await sharp(inputPath, {
+          page: frameIndex,
+          limitInputPixels: MAX_DECODED_PIXELS
+        })
+          .resize(scaledWidth, scaledHeight, { fit: 'inside' })
+          .rotate(transforms.rotation, {
+            background: { r: 0, g: 0, b: 0, alpha: 0 }
+          })
+          .png()
+          .toBuffer();
+
+        const layers = [];
+        if (transforms.strokeActive && transforms.strokeWidth > 0) {
+          const tinted = await sharp(transformedFrame)
+            .tint(colorToRgb(transforms.strokeColor))
+            .png()
+            .toBuffer();
+          for (let angle = 0; angle < Math.PI * 2; angle += Math.PI / 8) {
+            const layer = await centeredCompositeLayer(
+              tinted,
+              Math.round(Math.cos(angle) * transforms.strokeWidth),
+              Math.round(Math.sin(angle) * transforms.strokeWidth)
+            );
+            if (layer) layers.push(layer);
+          }
+        }
+
+        const mainLayer = await centeredCompositeLayer(transformedFrame);
+        if (mainLayer) layers.push(mainLayer);
+        if (textOverlay) layers.push({ input: textOverlay, left: 0, top: 0 });
+
+        await sharp({
+          create: {
+            width: 512,
+            height: 512,
+            channels: 4,
+            background: { r: 0, g: 0, b: 0, alpha: 0 }
+          }
+        })
+          .composite(layers)
           .png()
           .toFile(framePath);
       }
 
-      const outputFilename = `sticker_${id}.webm`;
-      const dateSubdir = getAnimatedDir(dateStr);
-      const outputPath = path.join(dateSubdir, outputFilename);
-
-      // Run 3-Tier progressive WebM compression engine
-      await compressAnimatedWebM(tempFramesDir, outputPath, targetFps, durationSec);
-
-      // Cleanup frames folder
-      try { fs.rmSync(tempFramesDir, { recursive: true, force: true }); } catch (e) {}
-
-      sticker.status = 'converted';
-      sticker.convertedPath = `/animated/${dateStr}/${outputFilename}`;
-      sticker.convertedFilename = outputFilename;
-      saveDatabase();
-      broadcast({ type: 'sticker_update', data: sticker });
-
-      return sticker;
-
-    } else {
-      // 2. STATIC CONVERSION (With Progressive WebP Binary Search)
-      console.log(`[Converter] Starting static WebP conversion for ID: ${id}`);
-      
-      const outputFilename = `sticker_${id}.webp`;
-      const dateSubdir = getStaticsDir(dateStr);
-      const outputPath = path.join(dateSubdir, outputFilename);
-
-      const compressionDetails = await compressStaticSticker(inputPath, outputPath, targetW, targetH);
-      console.log(`[Static Done] Quality: ${compressionDetails.quality}, Size: ${compressionDetails.sizeKb.toFixed(2)} KB`);
-
-      sticker.status = 'converted';
-      sticker.convertedPath = `/statics/${dateStr}/${outputFilename}`;
-      sticker.convertedFilename = outputFilename;
-      saveDatabase();
-      broadcast({ type: 'sticker_update', data: sticker });
-
-      return sticker;
-    }
-  })
-  .then((resultSticker) => {
-    return res.json({ success: true, sticker: resultSticker });
-  })
-  .catch((err) => {
-    console.error(`[Converter Error] Conversion failed for sticker ${id}:`, err);
-    sticker.status = 'failed';
-    saveDatabase();
-    broadcast({ type: 'sticker_update', data: sticker });
-    return res.status(500).json({ error: `Conversion failed: ${err.message}` });
-  });
-});
-
-// Edit and convert static sticker via Canvas Base64 data stream
-app.post('/api/edit-convert-static', async (req, res) => {
-  const { id, pngBase64 } = req.body;
-  if (!id || !pngBase64) {
-    return res.status(400).json({ error: 'Sticker ID and pngBase64 data are required.' });
-  }
-
-  const sticker = capturedStickers.find(s => s.id === id);
-  if (!sticker) return res.status(404).json({ error: 'Sticker not found.' });
-
-  sticker.status = 'converting';
-  broadcast({ type: 'sticker_update', data: sticker });
-
-  try {
-    // Strip header
-    const matches = pngBase64.match(/^data:image\/png;base64,(.+)$/);
-    if (!matches) throw new Error('Invalid base64 image data.');
-    const buffer = Buffer.from(matches[1], 'base64');
-
-    const dateStr = sticker.capturedDate || getTodayDateStr();
-    const outputFilename = `sticker_${id}.webp`;
-    const dateSubdir = getStaticsDir(dateStr);
-    const outputPath = path.join(dateSubdir, outputFilename);
-
-    // Save PNG buffer temporarily
-    const tempPngPath = path.join(TEMP_DIR, `temp_edit_${id}.png`);
-    fs.writeFileSync(tempPngPath, buffer);
-
-    // Resize and compress with binary search
-    const compressionDetails = await compressStaticSticker(tempPngPath, outputPath, 512, 512);
-    console.log(`[Static Edit Done] Quality: ${compressionDetails.quality}, Size: ${compressionDetails.sizeKb.toFixed(2)} KB`);
-
-    // Clean temp png
-    try { fs.unlinkSync(tempPngPath); } catch (e) {}
-
-    sticker.status = 'converted';
-    sticker.convertedPath = `/statics/${dateStr}/${outputFilename}`;
-    sticker.convertedFilename = outputFilename;
-    saveDatabase();
-    broadcast({ type: 'sticker_update', data: sticker });
-
-    return res.json({ success: true, sticker });
-  } catch (err) {
-    console.error(`[Static Edit Error]:`, err.message);
-    sticker.status = 'failed';
-    saveDatabase();
-    broadcast({ type: 'sticker_update', data: sticker });
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-// Edit and convert animated sticker with sequential Sharp transformations
-app.post('/api/edit-convert-animated', async (req, res) => {
-  const { id, startTime, transforms } = req.body;
-  if (!id || !transforms) {
-    return res.status(400).json({ error: 'Sticker ID and transforms configuration are required.' });
-  }
-
-  const sticker = capturedStickers.find(s => s.id === id);
-  if (!sticker) return res.status(404).json({ error: 'Sticker not found.' });
-
-  sticker.status = 'converting';
-  broadcast({ type: 'sticker_update', data: sticker });
-
-  const inputPath = path.join(getCapturedDir(sticker.capturedDate), sticker.originalFilename);
-  if (!fs.existsSync(inputPath)) {
-    sticker.status = 'failed';
-    broadcast({ type: 'sticker_update', data: sticker });
-    return res.status(404).json({ error: 'Original sticker not found.' });
-  }
-
-  conversionQueue.enqueue(async () => {
-    const sharpImg = sharp(inputPath, { animated: true });
-    const metadata = await sharpImg.metadata();
-    const totalFrames = metadata.pages || 1;
-
-    const dateStr = sticker.capturedDate || getTodayDateStr();
-
-    const tempFramesDir = path.join(TEMP_DIR, `frames_edit_${id}`);
-    if (fs.existsSync(tempFramesDir)) {
-      fs.rmSync(tempFramesDir, { recursive: true, force: true });
-    }
-    fs.mkdirSync(tempFramesDir, { recursive: true });
-
-    // Delays and range bounds
-    let delays = metadata.delay || [];
-    if (!Array.isArray(delays)) {
-      delays = new Array(totalFrames).fill(metadata.delay || 40);
-    }
-    const totalDurationMsAll = delays.reduce((sum, d) => sum + d, 0);
-    const originalFps = (totalFrames / totalDurationMsAll) * 1000 || 25;
-
-    // Use selected 3-second chunk
-    const start = Math.min(totalFrames - 1, Math.round((startTime || 0) * originalFps));
-    const avgDelayAll = totalDurationMsAll / totalFrames;
-    const maxFramesIn3Sec = Math.floor(3000 / avgDelayAll);
-    const end = Math.min(totalFrames - 1, start + maxFramesIn3Sec - 1);
-
-    const activeDelays = delays.slice(start, end + 1);
-    const totalDurationMs = activeDelays.reduce((sum, d) => sum + d, 0);
-    const durationSec = totalDurationMs / 1000;
-
-    const avgDelay = totalDurationMs / activeDelays.length;
-    const calculatedFps = (1000 / avgDelay) || 25;
-    const targetFps = Math.min(30, Math.round(calculatedFps));
-
-    console.log(`[Animated Editor] Slicing range [${start} - ${end}] for customized export`);
-
-    const { scale, rotation, strokeActive, strokeWidth, strokeColor, topText, bottomText, textColor, textSize } = transforms;
-
-    // Build SVG meme text overlays if configured
-    let textOverlaySvg = null;
-    if (topText || bottomText) {
-      const topSvg = topText ? `<text x="256" y="60" text-anchor="middle" font-family="Impact" font-size="${textSize || 32}" font-weight="bold" fill="${textColor || 'white'}" stroke="black" stroke-width="2">${topText.toUpperCase()}</text>` : '';
-      const bottomSvg = bottomText ? `<text x="256" y="460" text-anchor="middle" font-family="Impact" font-size="${textSize || 32}" font-weight="bold" fill="${textColor || 'white'}" stroke="black" stroke-width="2">${bottomText.toUpperCase()}</text>` : '';
-      textOverlaySvg = Buffer.from(`
-        <svg width="512" height="512">
-          ${topSvg}
-          ${bottomSvg}
-        </svg>
-      `);
-    }
-
-    // Apply frame-by-frame transforms
-    for (let i = start; i <= end; i++) {
-      const relativeIndex = i - start;
-      const framePath = path.join(tempFramesDir, `frame_${String(relativeIndex).padStart(4, '0')}.png`);
-
-      let frameMetadata = await sharp(inputPath, { page: i }).metadata();
-      const w = frameMetadata.width;
-      const h = frameMetadata.pageHeight || frameMetadata.height;
-      let targetW, targetH;
-
-      if (w >= h) {
-        targetW = 512;
-        targetH = Math.round((h * 512) / w);
-      } else {
-        targetH = 512;
-        targetW = Math.round((w * 512) / h);
-      }
-
-      // Resize primary frame
-      const resizedFrameBuffer = await sharp(inputPath, { page: i })
-        .resize(Math.round(targetW * scale), Math.round(targetH * scale), { fit: 'inside' })
-        .rotate(rotation)
-        .png()
-        .toBuffer();
-
-      // Create primary sharp image for composite
-      let finalPipeline = sharp({
-        create: {
-          width: 512,
-          height: 512,
-          channels: 4,
-          background: { r: 0, g: 0, b: 0, alpha: 0 }
+      const dateStr = sticker.capturedDate || getTodayDateStr();
+      const outputFilename = `sticker_${sticker.id}.webm`;
+      const candidatePath = path.join(jobDirectory, outputFilename);
+      const compression = await compressAnimatedWebM(
+        jobDirectory,
+        candidatePath,
+        selected.delays
+      );
+      const sizeBytes = await assertOutputFile(candidatePath, ANIMATED_SIZE_LIMIT);
+      const updates = buildConversionUpdates({
+        kind: 'animated-edit',
+        convertedPath: `/animated/${dateStr}/${outputFilename}`,
+        convertedFilename: outputFilename,
+        range,
+        sizeBytes,
+        details: {
+          encoderMode: compression.mode,
+          transforms: cloneMetadataValue(transforms),
+          sourceFrames: pages
         }
       });
-
-      const compositingArray = [];
-
-      // If stroke active, draw silhouette outline by overlaying a tinted mask radially
-      if (strokeActive && strokeWidth > 0) {
-        // Hex parsing to tint background color
-        const r = parseInt(strokeColor.slice(1, 3), 16) || 255;
-        const g = parseInt(strokeColor.slice(3, 5), 16) || 255;
-        const b = parseInt(strokeColor.slice(5, 7), 16) || 255;
-
-        // Build a tinted buffer
-        const tintedOffset = await sharp(resizedFrameBuffer)
-          .tint({ r, g, b })
-          .toBuffer();
-
-        const stepAngle = 0.5;
-        for (let angle = 0; angle < Math.PI * 2; angle += stepAngle) {
-          const dx = Math.round(Math.cos(angle) * strokeWidth);
-          const dy = Math.round(Math.sin(angle) * strokeWidth);
-
-          compositingArray.push({
-            input: tintedOffset,
-            top: Math.round(256 - (targetH * scale) / 2 + dy),
-            left: Math.round(256 - (targetW * scale) / 2 + dx)
-          });
-        }
-      }
-
-      // Add main image exactly centered
-      compositingArray.push({
-        input: resizedFrameBuffer,
-        top: Math.round(256 - (targetH * scale) / 2),
-        left: Math.round(256 - (targetW * scale) / 2)
+      return promoteCandidateAndPersist({
+        candidatePath,
+        outputPath: path.join(getAnimatedDir(dateStr), outputFilename),
+        sizeLimit: ANIMATED_SIZE_LIMIT,
+        sticker,
+        snapshot,
+        updates
       });
-
-      // Add SVG text overlays
-      if (textOverlaySvg) {
-        compositingArray.push({
-          input: textOverlaySvg,
-          top: 0,
-          left: 0
-        });
-      }
-
-      await finalPipeline
-        .composite(compositingArray)
-        .png()
-        .toFile(framePath);
+    } finally {
+      await removeJobDirectory(jobDirectory);
     }
-
-    const outputFilename = `sticker_${id}.webm`;
-    const dateSubdir = getAnimatedDir(dateStr);
-    const outputPath = path.join(dateSubdir, outputFilename);
-
-    // Compile frames to transparent WebM VP9
-    await compressAnimatedWebM(tempFramesDir, outputPath, targetFps, durationSec);
-
-    // Clean frames
-    try { fs.rmSync(tempFramesDir, { recursive: true, force: true }); } catch (e) {}
-
-    sticker.status = 'converted';
-    sticker.convertedPath = `/animated/${dateStr}/${outputFilename}`;
-    sticker.convertedFilename = outputFilename;
-    saveDatabase();
-    broadcast({ type: 'sticker_update', data: sticker });
-
-    return sticker;
-  })
-  .then((result) => {
-    return res.json({ success: true, sticker: result });
-  })
-  .catch((err) => {
-    console.error(`[Animated Edit Error]:`, err.message);
-    sticker.status = 'failed';
-    saveDatabase();
-    broadcast({ type: 'sticker_update', data: sticker });
-    return res.status(500).json({ error: err.message });
   });
 });
 
@@ -1388,32 +1540,78 @@ app.post('/api/stickers/:id/tags', (req, res) => {
 });
 
 // WebSocket Server Handshake
-wss.on('connection', (ws) => {
-  console.log('[WebSocket] Frontend client connected.');
-  
-  // Send current state and captured stickers database on connect
-  ws.send(JSON.stringify({
-    type: 'init',
-    data: {
-      chromeConnected,
-      tiktokTabFound,
-      cdpConnecting,
-      stickers: capturedStickers
-    }
-  }));
-
-  ws.on('close', () => {
-    console.log('[WebSocket] Frontend client disconnected.');
+server.on('upgrade', (request, socket, head) => {
+  let pathname = '';
+  try {
+    pathname = new URL(request.url, 'http://127.0.0.1').pathname;
+  } catch (_) {
+    socket.destroy();
+    return;
+  }
+  if (pathname !== '/ws' || !security.authorizeWebSocket(request)) {
+    socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  wss.handleUpgrade(request, socket, head, (ws) => {
+    wss.emit('connection', ws, request);
   });
 });
 
-// Start the server
-const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
-  console.log(`=======================================================`);
-  console.log(` TIKTOK TO TELEGRAM STICKER SERVER RUNNING ON PORT ${PORT}`);
-  console.log(` API Endpoint: http://localhost:${PORT}`);
-  console.log(` Output folder: ${OUTPUT_DIR}`);
-  console.log(`=======================================================`);
-  console.log(`Waiting for Google Chrome connection... Run start-chrome.bat`);
+wss.on('connection', (ws) => {
+  ws.send(JSON.stringify({
+    type: 'init',
+    data: {
+      ...getStatusPayload(),
+      stickers: capturedStickers
+    }
+  }));
 });
+
+app.use('/api', (_req, res) => {
+  res.status(404).json({ error: 'API endpoint not found.' });
+});
+
+const frontendDist = path.join(__dirname, 'frontend', 'dist');
+if (fs.existsSync(frontendDist)) {
+  app.use(express.static(frontendDist));
+  app.get('*', (_req, res) => res.sendFile(path.join(frontendDist, 'index.html')));
+}
+
+app.use((error, _req, res, _next) => {
+  if (error && error.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Request body exceeds the configured limit.' });
+  }
+  console.error('[HTTP Error]', error);
+  return res.status(500).json({ error: 'Internal server error.' });
+});
+
+function startServer(port = PORT) {
+  if (server.listening) return server;
+  server.listen(port, HOST, () => {
+    const address = server.address();
+    const listeningPort = address && typeof address === 'object' ? address.port : port;
+    console.log('=======================================================');
+    console.log(` STICKER SERVER: http://${HOST}:${listeningPort}`);
+    console.log(` Output folder: ${OUTPUT_DIR}`);
+    console.log(' Capture mode: DevTools response bodies only (no CDP, DOM automation, or CDN refetch)');
+    console.log(` Session budget: ${SESSION_MAX_CAPTURES} captures / ${Math.round(SESSION_MAX_MS / 60000)} min`);
+    console.log(` Extension ingest: ${INGEST_TOKEN ? 'Bearer token required' : 'DISABLED (set INGEST_TOKEN)'}`);
+    console.log('=======================================================');
+  });
+  return server;
+}
+
+if (require.main === module) startServer();
+
+module.exports = {
+  app,
+  server,
+  wss,
+  startServer,
+  getStatusPayload,
+  getOutputPaths,
+  importHarFile,
+  createLibraryArchive,
+  processCapturedSticker
+};

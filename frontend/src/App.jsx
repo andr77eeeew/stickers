@@ -1,13 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Sparkles, 
-  Chrome, 
   Layers, 
   CheckCircle, 
   AlertTriangle, 
   ArrowDownToLine, 
   RefreshCw, 
-  Trash2, 
+  Archive,
   ExternalLink,
   Info,
   Folder,
@@ -18,27 +17,116 @@ import {
   Tag,
   Sliders,
   Type,
-  RotateCw
+  RotateCw,
+  Upload,
+  FileImage
 } from 'lucide-react';
 
-const BACKEND_PORT = 3001;
-const API_URL = `http://localhost:${BACKEND_PORT}`;
-const WS_URL = `ws://localhost:${BACKEND_PORT}`;
-const TARGET_FPS = 25; // Standard sticker FPS
+const PAGE_SIZE = 48;
+
+const apiFetch = (path, options = {}) => fetch(path, {
+  ...options,
+  credentials: 'same-origin'
+});
+
+const getWebSocketUrl = () => {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.host}/ws`;
+};
+
+const normalizeMediaPath = (path) => {
+  if (!path) return '';
+  if (path.startsWith('/')) return path;
+  return `/${path.replace(/^\.?[\\/]+/, '').replaceAll('\\', '/')}`;
+};
+
+const getOriginalPath = (sticker) => normalizeMediaPath(
+  sticker.originalPath
+  || sticker.capturedPath
+  || `captured/${sticker.capturedDate || 'default'}/${sticker.originalFilename}`
+);
+
+const readFiniteNumber = (...values) => {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number >= 0) return number;
+  }
+  return null;
+};
+
+const getStickerDuration = (sticker) => {
+  if (!sticker?.isAnimated) return 0;
+
+  const durationMs = readFiniteNumber(
+    sticker.durationMs,
+    sticker.metadata?.durationMs,
+    sticker.animation?.durationMs
+  );
+  if (durationMs !== null) return durationMs / 1000;
+
+  const durationSeconds = readFiniteNumber(
+    sticker.durationSeconds,
+    sticker.duration,
+    sticker.metadata?.durationSeconds,
+    sticker.animation?.durationSeconds
+  );
+  if (durationSeconds !== null) return durationSeconds;
+
+  const frameDelays = sticker.frameDelays || sticker.metadata?.frameDelays;
+  if (Array.isArray(frameDelays) && frameDelays.length) {
+    return frameDelays.reduce((sum, delay) => sum + Math.max(0, Number(delay) || 0), 0) / 1000;
+  }
+
+  if (Array.isArray(sticker.delay) && sticker.delay.length) {
+    return sticker.delay.reduce((sum, delay) => sum + Math.max(0, Number(delay) || 0), 0) / 1000;
+  }
+
+  const frameCount = readFiniteNumber(sticker.frames) || 0;
+  const frameDelayMs = readFiniteNumber(sticker.delay, sticker.metadata?.delay);
+  if (frameDelayMs !== null) return (frameCount * frameDelayMs) / 1000;
+
+  const fps = readFiniteNumber(sticker.fps, sticker.metadata?.fps);
+  return fps ? frameCount / fps : frameCount / 25;
+};
+
+const getPersistedRange = (sticker) => {
+  const source = sticker.selectedRange || sticker.renderedRange || sticker.conversion?.range || {};
+  const start = readFiniteNumber(
+    source.start,
+    source.startTime,
+    sticker.selectedStartTime,
+    sticker.startTime,
+    sticker.conversion?.startTime
+  ) || 0;
+  const explicitEnd = readFiniteNumber(source.end, source.endTime, sticker.selectedEndTime);
+  const duration = readFiniteNumber(source.duration, sticker.selectedDuration, sticker.conversion?.duration) || 3;
+  return { start, end: explicitEnd ?? start + duration };
+};
 
 export default function App() {
   const [stickers, setStickers] = useState([]);
   const [activeTab, setActiveTab] = useState('all'); // 'all' | 'static' | 'animated'
   const [searchQuery, setSearchQuery] = useState('');
-  
-  // Connection states
-  const [chromeConnected, setChromeConnected] = useState(false);
-  const [tiktokTabFound, setTiktokTabFound] = useState(false);
-  const [cdpConnecting, setCdpConnecting] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+
+  // The dashboard authenticates with the local server before opening WebSocket.
+  const [bootstrapState, setBootstrapState] = useState('loading');
+  const [bootstrapError, setBootstrapError] = useState('');
+  const [captureStatus, setCaptureStatus] = useState({
+    captureMode: 'offline',
+    devtools: { state: 'closed', listening: false, lastAcceptedAt: null, lastError: null },
+    storage: null
+  });
+  const [sessionInfo, setSessionInfo] = useState(null);
+  const [outputPaths, setOutputPaths] = useState({});
   const [socketConnected, setSocketConnected] = useState(false);
-  const [copySuccess, setCopySuccess] = useState(false);
   const [folderCopySuccess, setFolderCopySuccess] = useState(false);
   const [toastMessage, setToastMessage] = useState(null);
+  const [manualImporting, setManualImporting] = useState(false);
+  const [manualAutoConvert, setManualAutoConvert] = useState(true);
+  const [manualDragOver, setManualDragOver] = useState(false);
+  const [archiving, setArchiving] = useState(false);
+  const fileInputRef = useRef(null);
   
   // Tags editing state dictionary (stickerId -> string)
   const [editingTags, setEditingTags] = useState({});
@@ -61,81 +149,123 @@ export default function App() {
   const [selectedStartTimes, setSelectedStartTimes] = useState({});
   
   const wsRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
+  const mountedRef = useRef(false);
   const canvasRef = useRef(null);
+  const modalRef = useRef(null);
+  const modalCloseRef = useRef(null);
+  const editorTriggerRef = useRef(null);
+  const toastTimerRef = useRef(null);
 
   const showToast = (message) => {
     setToastMessage(message);
-    setTimeout(() => setToastMessage(null), 4000);
-  };
-
-  // Connect to WebSocket Server
-  const connectWebSocket = () => {
-    if (wsRef.current) {
-      wsRef.current.onclose = null;
-      wsRef.current.close();
-    }
-
-    console.log(`[WebSocket] Connecting to ${WS_URL}...`);
-    const socket = new WebSocket(WS_URL);
-    wsRef.current = socket;
-
-    socket.onopen = () => {
-      console.log('[WebSocket] Connection established.');
-      setSocketConnected(true);
-    };
-
-    socket.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data);
-        const { type, data } = message;
-
-        switch (type) {
-          case 'init':
-            setChromeConnected(data.chromeConnected);
-            setTiktokTabFound(data.tiktokTabFound);
-            setCdpConnecting(data.cdpConnecting);
-            setStickers(data.stickers);
-            break;
-            
-          case 'status':
-            setChromeConnected(data.chromeConnected);
-            setTiktokTabFound(data.tiktokTabFound);
-            setCdpConnecting(data.cdpConnecting);
-            break;
-
-          case 'new_sticker':
-            setStickers(prev => {
-              if (prev.some(s => s.id === data.id)) return prev;
-              return [data, ...prev];
-            });
-            break;
-
-          case 'sticker_update':
-            setStickers(prev => 
-              prev.map(s => s.id === data.id ? { ...s, ...data } : s)
-            );
-            break;
-
-          default:
-            break;
-        }
-      } catch (err) {
-        console.error('[WebSocket] Message parsing error:', err);
-      }
-    };
-
-    socket.onclose = () => {
-      console.log('[WebSocket] Connection lost. Reconnecting in 3s...');
-      setSocketConnected(false);
-      setChromeConnected(false);
-      setTiktokTabFound(false);
-      setTimeout(connectWebSocket, 3000);
-    };
+    window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => setToastMessage(null), 4000);
   };
 
   useEffect(() => {
-    connectWebSocket();
+    mountedRef.current = true;
+
+    const applyStatus = (payload) => {
+      if (!payload) return;
+      const status = payload.status || payload;
+      setCaptureStatus((previous) => ({
+        ...previous,
+        ...status,
+        devtools: { ...previous.devtools, ...(status.devtools || {}) }
+      }));
+      if (status.session) setSessionInfo(status.session);
+      if (status.outputPaths) setOutputPaths((previous) => ({ ...previous, ...status.outputPaths }));
+      if (status.storage?.paths) setOutputPaths((previous) => ({ ...previous, ...status.storage.paths }));
+    };
+
+    const scheduleReconnect = () => {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = window.setTimeout(() => {
+        if (mountedRef.current) bootstrap();
+      }, 3000);
+    };
+
+    const connectWebSocket = () => {
+      if (!mountedRef.current) return;
+      const socket = new WebSocket(getWebSocketUrl());
+      wsRef.current = socket;
+
+      socket.onopen = () => setSocketConnected(true);
+      socket.onmessage = (event) => {
+        try {
+          const { type, data } = JSON.parse(event.data);
+          if (type === 'init') {
+            applyStatus(data);
+            setStickers(data?.stickers || []);
+          } else if (type === 'status' || type === 'capture_status') {
+            applyStatus(data);
+          } else if (type === 'new_sticker') {
+            setStickers((previous) => previous.some((item) => item.id === data.id)
+              ? previous
+              : [data, ...previous]);
+            if (data.captureSource === 'devtools') {
+              setCaptureStatus((previous) => ({
+                ...previous,
+                devtools: {
+                  ...previous.devtools,
+                  state: 'last_asset_accepted',
+                  listening: null,
+                  lastAcceptedAt: data.capturedAt || new Date().toISOString(),
+                  lastError: null
+                }
+              }));
+            }
+          } else if (type === 'sticker_update') {
+            setStickers((previous) => previous.map((item) => item.id === data.id
+              ? { ...item, ...data }
+              : item));
+          }
+        } catch (error) {
+          console.error('[WebSocket] Invalid message:', error);
+        }
+      };
+      socket.onerror = () => setSocketConnected(false);
+      socket.onclose = () => {
+        setSocketConnected(false);
+        if (mountedRef.current) scheduleReconnect();
+      };
+    };
+
+    const bootstrap = async () => {
+      try {
+        setBootstrapState('loading');
+        setBootstrapError('');
+        const response = await apiFetch('/api/session');
+        const result = await response.json();
+        if (!response.ok || !result.authenticated) {
+          throw new Error(result.error || 'Local session authentication failed');
+        }
+
+        if (!mountedRef.current) return;
+        applyStatus(result.status || result);
+        setOutputPaths(result.outputPaths || result.status?.outputPaths || {});
+        setBootstrapState('ready');
+
+        if (wsRef.current) {
+          wsRef.current.onclose = null;
+          wsRef.current.close();
+        }
+        connectWebSocket();
+      } catch (error) {
+        if (!mountedRef.current) return;
+        setBootstrapState('error');
+        setBootstrapError(error.message);
+        setSocketConnected(false);
+        scheduleReconnect();
+      }
+    };
+
+    bootstrap();
     return () => {
+      mountedRef.current = false;
+      window.clearTimeout(reconnectTimerRef.current);
+      window.clearTimeout(toastTimerRef.current);
       if (wsRef.current) {
         wsRef.current.onclose = null;
         wsRef.current.close();
@@ -158,9 +288,9 @@ export default function App() {
 
     // Source depending on static WebP vs scrubbing animated frame
     if (editingSticker.isAnimated) {
-      img.src = `${API_URL}/api/stickers/${editingSticker.id}/frame/${editorActiveFrame}`;
+      img.src = `/api/stickers/${editingSticker.id}/frame/${editorActiveFrame}`;
     } else {
-      img.src = `${API_URL}/captured/${editingSticker.capturedDate || 'default'}/${editingSticker.originalFilename}`;
+      img.src = getOriginalPath(editingSticker);
     }
 
     img.onload = () => {
@@ -258,6 +388,61 @@ export default function App() {
     editorActiveFrame
   ]);
 
+  useEffect(() => {
+    if (!editingSticker) return undefined;
+
+    const previousOverflow = document.body.style.overflow;
+    const previouslyFocused = document.activeElement;
+    document.body.style.overflow = 'hidden';
+    const focusFrame = window.requestAnimationFrame(() => modalCloseRef.current?.focus());
+
+    const handleModalKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setEditingSticker(null);
+        return;
+      }
+
+      if (event.key !== 'Tab' || !modalRef.current) return;
+      const focusable = Array.from(modalRef.current.querySelectorAll(
+        'button:not([disabled]), input:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+      )).filter((element) => !element.hasAttribute('hidden'));
+      if (!focusable.length) return;
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener('keydown', handleModalKeyDown);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener('keydown', handleModalKeyDown);
+      document.body.style.overflow = previousOverflow;
+      const focusTarget = editorTriggerRef.current || previouslyFocused;
+      window.setTimeout(() => focusTarget?.focus(), 0);
+    };
+  }, [editingSticker]);
+
+  const openEditor = (sticker, trigger) => {
+    editorTriggerRef.current = trigger;
+    setEditorScale(1.0);
+    setEditorRotation(0);
+    setEditorTopText('');
+    setEditorBottomText('');
+    setEditorStrokeActive(false);
+    setEditorStrokeWidth(6);
+    setEditorStrokeColor('#ffffff');
+    setEditorActiveFrame(0);
+    setEditingSticker(sticker);
+  };
+
   // Trigger Conversion API
   const handleConvert = async (id) => {
     try {
@@ -265,9 +450,10 @@ export default function App() {
         prev.map(s => s.id === id ? { ...s, status: 'converting' } : s)
       );
 
-      const startTime = selectedStartTimes[id] || 0;
+      const currentSticker = stickers.find((sticker) => sticker.id === id);
+      const startTime = selectedStartTimes[id] ?? getPersistedRange(currentSticker || {}).start;
 
-      const response = await fetch(`${API_URL}/api/convert`, {
+      const response = await apiFetch(`/api/convert`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id, startTime })
@@ -303,8 +489,8 @@ export default function App() {
     try {
       if (editingSticker.isAnimated) {
         // Post transforms model to backend for frame-by-frame renders
-        const startTime = selectedStartTimes[editingSticker.id] || 0;
-        const response = await fetch(`${API_URL}/api/edit-convert-animated`, {
+        const startTime = selectedStartTimes[editingSticker.id] ?? getPersistedRange(editingSticker).start;
+        const response = await apiFetch(`/api/edit-convert-animated`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -334,7 +520,7 @@ export default function App() {
         const canvas = canvasRef.current;
         const dataUrl = canvas.toDataURL('image/png');
 
-        const response = await fetch(`${API_URL}/api/edit-convert-static`, {
+        const response = await apiFetch(`/api/edit-convert-static`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -364,7 +550,7 @@ export default function App() {
     const tagsArray = tagString.split(',').map(t => t.trim()).filter(Boolean);
 
     try {
-      const response = await fetch(`${API_URL}/api/stickers/${id}/tags`, {
+      const response = await apiFetch(`/api/stickers/${id}/tags`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tags: tagsArray })
@@ -379,14 +565,14 @@ export default function App() {
           return copy;
         });
       }
-    } catch (e) {
+    } catch {
       showToast('❌ Failed to save tags.');
     }
   };
 
   const triggerBrowserDownload = (sticker) => {
     if (!sticker.convertedPath) return;
-    const downloadUrl = `${API_URL}${sticker.convertedPath}`;
+    const downloadUrl = normalizeMediaPath(sticker.convertedPath);
     const link = document.createElement('a');
     link.href = downloadUrl;
     link.download = sticker.convertedFilename;
@@ -395,69 +581,170 @@ export default function App() {
     document.body.removeChild(link);
   };
 
-  // Clear Database API
-  const handleClearAll = async () => {
-    if (!window.confirm('Are you sure you want to clear all captured stickers? This will delete files on the server.')) {
-      return;
-    }
+  // Archiving creates a recoverable snapshot; the active library remains untouched.
+  const handleArchiveLibrary = async () => {
+    const confirmed = window.confirm(
+      'Create an archive snapshot of the current library? The server will copy the database and media to a dated archive. The active library will stay unchanged.'
+    );
+    if (!confirmed) return;
+
+    setArchiving(true);
     try {
-      const response = await fetch(`${API_URL}/api/stickers/clear`, {
-        method: 'POST'
-      });
-      if (response.ok) {
-        setStickers([]);
+      const response = await apiFetch('/api/library/archive', { method: 'POST' });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Archive failed');
+
+      if (result.status) {
+        setCaptureStatus((previous) => ({
+          ...previous,
+          ...result.status,
+          devtools: { ...previous.devtools, ...(result.status.devtools || {}) }
+        }));
+        if (result.status.session) setSessionInfo(result.status.session);
       }
-    } catch (err) {
-      console.error('Failed to clear stickers:', err);
+      const archivePath = result.archive?.path;
+      showToast(archivePath ? `Archive snapshot created: ${archivePath}` : 'Archive snapshot created. The active library is unchanged.');
+    } catch (error) {
+      showToast(`Archive failed: ${error.message}`);
+    } finally {
+      setArchiving(false);
     }
   };
 
-  const copyCommand = () => {
-    const cmd = `start chrome.exe --remote-debugging-port=9222 "https://www.tiktok.com/messages"`;
-    navigator.clipboard.writeText(cmd);
-    setCopySuccess(true);
-    setTimeout(() => setCopySuccess(false), 2000);
+  /** Manual local import — zero TikTok traffic */
+  const handleManualFiles = async (fileList) => {
+    if (bootstrapState !== 'ready') {
+      showToast('Wait for the local authenticated session before importing files.');
+      return;
+    }
+
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+
+    const allowed = /\.(png|jpe?g|webp|gif|tif{1,2}|avif|mp4|webm|mov|mkv|m4v)$/i;
+    const valid = files.filter((f) => allowed.test(f.name));
+    if (!valid.length) {
+      showToast('Unsupported files. Use png, jpg, webp, gif, mp4, webm, mov…');
+      return;
+    }
+
+    setManualImporting(true);
+    try {
+      const form = new FormData();
+      valid.forEach((f) => form.append('files', f));
+
+      const response = await apiFetch(`/api/import/files`, {
+        method: 'POST',
+        body: form
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || 'Import failed');
+      }
+
+      const newOnes = (result.results || [])
+        .filter((r) => r.success && r.sticker)
+        .map((r) => r.sticker);
+
+      if (newOnes.length) {
+        setStickers((prev) => {
+          const ids = new Set(prev.map((s) => s.id));
+          const merged = [...newOnes.filter((s) => !ids.has(s.id)), ...prev];
+          return merged;
+        });
+      }
+
+      showToast(
+        `Import: ${result.imported} new, ${result.duplicates || 0} dup, ${result.failed || 0} failed`
+      );
+
+      if (manualAutoConvert && newOnes.length) {
+        for (const s of newOnes) {
+          if (s.status === 'captured' && !result.results?.find((r) => r.sticker?.id === s.id && r.duplicate)) {
+            // only convert truly new non-duplicate imports
+            const wasDup = (result.results || []).find((r) => r.sticker?.id === s.id)?.duplicate;
+            if (!wasDup) {
+              await handleConvert(s.id);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Manual import error:', err);
+      showToast(`Import failed: ${err.message}`);
+    } finally {
+      setManualImporting(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleResetSession = async () => {
+    try {
+      const response = await apiFetch('/api/session/reset', { method: 'POST' });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Reset failed');
+      setSessionInfo(result.session);
+      showToast('DevTools capture budget reset.');
+    } catch (error) {
+      showToast(`Session reset failed: ${error.message}`);
+    }
   };
 
   const getTodayFolder = () => {
     return new Date().toISOString().split('T')[0]; // "YYYY-MM-DD"
   };
 
-  const copyFolderPath = () => {
-    const folderPath = `D:\\Projects\\stickers\\output\\${getTodayFolder()}`;
-    navigator.clipboard.writeText(folderPath);
-    setFolderCopySuccess(true);
-    setTimeout(() => setFolderCopySuccess(false), 2000);
+  const getOutputPath = (key) => {
+    const aliases = {
+      root: ['root', 'output', 'outputRoot', 'rootPath'],
+      captured: ['captured', 'capturedPath'],
+      statics: ['statics', 'static', 'staticsPath', 'staticPath'],
+      animated: ['animated', 'animatedPath']
+    };
+    const sources = [outputPaths, captureStatus.storage?.paths, captureStatus.storage];
+    for (const source of sources) {
+      for (const alias of aliases[key] || [key]) {
+        if (typeof source?.[alias] === 'string' && source[alias]) return source[alias];
+      }
+    }
+    return key === 'root' ? 'output/' : `output/${key}/`;
   };
 
-  const getStickerDuration = (sticker) => {
-    if (!sticker.isAnimated) return 0;
-    return Math.round((sticker.frames / TARGET_FPS) * 10) / 10;
+  const copyFolderPath = async () => {
+    try {
+      await navigator.clipboard.writeText(getOutputPath('root'));
+      setFolderCopySuccess(true);
+      window.setTimeout(() => setFolderCopySuccess(false), 2000);
+    } catch {
+      showToast('Could not copy the storage path.');
+    }
   };
 
-  // Filter stickers by tab AND fuzzy search query
-  const filteredStickers = stickers.filter(sticker => {
+
+  // Filter stickers by tab AND fuzzy search query.
+  const filteredStickers = stickers.filter((sticker) => {
     let matchesTab = true;
     if (activeTab === 'static') matchesTab = !sticker.isAnimated;
     if (activeTab === 'animated') matchesTab = sticker.isAnimated;
 
     let matchesSearch = true;
     if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      const idMatch = sticker.id.toLowerCase().includes(q);
-      const filenameMatch = sticker.originalFilename.toLowerCase().includes(q);
-      const tagMatch = sticker.tags && sticker.tags.some(tag => tag.toLowerCase().includes(q));
-      matchesSearch = idMatch || filenameMatch || tagMatch;
+      const query = searchQuery.toLowerCase();
+      const idMatch = String(sticker.id || '').toLowerCase().includes(query);
+      const filenameMatch = String(sticker.originalFilename || '').toLowerCase().includes(query);
+      const tagMatch = sticker.tags?.some((tag) => String(tag).toLowerCase().includes(query));
+      matchesSearch = idMatch || filenameMatch || Boolean(tagMatch);
     }
 
     return matchesTab && matchesSearch;
   });
 
+  const visibleStickers = filteredStickers.slice(0, visibleCount);
   const totalCount = stickers.length;
-  const staticCount = stickers.filter(s => !s.isAnimated).length;
-  const animatedCount = stickers.filter(s => s.isAnimated).length;
+  const staticCount = stickers.filter((sticker) => !sticker.isAnimated).length;
+  const animatedCount = stickers.filter((sticker) => sticker.isAnimated).length;
 
-  const stickersByDate = filteredStickers.reduce((groups, sticker) => {
+  const stickersByDate = visibleStickers.reduce((groups, sticker) => {
     const date = sticker.capturedDate || getTodayFolder();
     if (!groups[date]) {
       groups[date] = [];
@@ -467,6 +754,17 @@ export default function App() {
   }, {});
 
   const sortedDates = Object.keys(stickersByDate).sort((a, b) => b.localeCompare(a));
+  const devtoolsStatus = captureStatus.devtools || {};
+  const devtoolsState = devtoolsStatus.state || 'disabled';
+  const isDevtoolsMode = devtoolsStatus.enabled === true;
+  const isDeliveryFailure = devtoolsState === 'local_delivery_failed' || Boolean(devtoolsStatus.lastError);
+  const lastAcceptedAt = devtoolsStatus.lastAcceptedAt || devtoolsStatus.lastIngestAt;
+  const storageIssueCount = ['missingOriginals', 'missingConverted', 'orphanFiles', 'tempEntries', 'staleConversions']
+    .reduce((sum, key) => {
+      const value = captureStatus.storage?.[key];
+      return sum + (Array.isArray(value) ? value.length : Number(value) || 0);
+    }, 0);
+  const outputRootPath = getOutputPath('root');
 
   return (
     <div className="app-container">
@@ -479,106 +777,152 @@ export default function App() {
               TikTok to <span className="gradient-text">Telegram</span>
             </h1>
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '2px', fontWeight: 500 }}>
-              Cyber Grabber & Premium Canvas Creator Suite
+              Offline-first Sticker Workspace & Telegram Converter
             </p>
           </div>
         </div>
 
-        <div className="glass-panel" style={{ padding: '10px 20px', display: 'flex', alignItems: 'center', gap: '10px', fontSize: '0.8rem', borderRadius: '14px' }}>
-          <span className={`status-dot ${socketConnected ? 'green' : 'red'}`} />
+        <div className="glass-panel system-state" role="status" aria-live="polite">
+          <span className={`status-dot ${socketConnected ? 'green' : bootstrapState === 'error' ? 'red' : 'yellow'}`} aria-hidden="true" />
           <span style={{ color: 'var(--text-secondary)' }}>
-            System state: <strong style={{ color: 'var(--text-primary)' }}>{socketConnected ? 'Connected' : 'Disconnected'}</strong>
+            Local service:{' '}
+            <strong style={{ color: 'var(--text-primary)' }}>
+              {socketConnected ? 'Connected' : bootstrapState === 'error' ? 'Unavailable' : 'Connecting'}
+            </strong>
           </span>
         </div>
       </header>
 
-      {/* Connection State Banner */}
-      <div className="status-banner glass-panel">
+      {/* Capture Safety Banner */}
+      <div
+        className="status-banner glass-panel"
+        role={bootstrapState === 'error' || (isDevtoolsMode && isDeliveryFailure) ? 'alert' : 'status'}
+        aria-live="polite"
+      >
         <div className="status-info">
-          {chromeConnected && tiktokTabFound ? (
+          {bootstrapState === 'loading' ? (
             <>
-              <span className="status-dot green" />
+              <span className="status-dot yellow" aria-hidden="true" />
               <div>
-                <div className="status-text" style={{ color: 'var(--accent-emerald)' }}>Active & Monitoring</div>
+                <div className="status-text" style={{ color: 'var(--status-yellow)' }}>Authenticating local dashboard…</div>
+                <div className="status-details">The dashboard establishes a private same-origin session before any API or WebSocket traffic.</div>
+              </div>
+            </>
+          ) : bootstrapState === 'error' ? (
+            <>
+              <span className="status-dot red" aria-hidden="true" />
+              <div>
+                <div className="status-text" style={{ color: 'var(--status-red)' }}>Local server unavailable</div>
+                <div className="status-details">{bootstrapError || 'Session authentication failed.'} Retrying automatically.</div>
+              </div>
+            </>
+          ) : isDevtoolsMode && sessionInfo?.exhausted ? (
+            <>
+              <span className="status-dot red" aria-hidden="true" />
+              <div>
+                <div className="status-text" style={{ color: 'var(--status-red)' }}>DevTools capture budget exhausted</div>
+                <div className="status-details">Limit hit ({sessionInfo.exhaustReason || 'budget'}). Reset only after you intentionally begin a new capture session.</div>
+              </div>
+            </>
+          ) : isDevtoolsMode && isDeliveryFailure ? (
+            <>
+              <span className="status-dot red" aria-hidden="true" />
+              <div>
+                <div className="status-text" style={{ color: 'var(--status-red)' }}>Local DevTools delivery failed</div>
+                <div className="status-details">{devtoolsStatus.lastError || 'The extension could not deliver an already-loaded response body to localhost.'}</div>
+              </div>
+            </>
+          ) : isDevtoolsMode && devtoolsState === 'last_asset_accepted' ? (
+            <>
+              <span className="status-dot green" aria-hidden="true" />
+              <div>
+                <div className="status-text" style={{ color: 'var(--accent-emerald)' }}>Last DevTools asset accepted</div>
                 <div className="status-details">
-                  Chrome debugger detected. Intercepting TikTok sticker DOM mutations in real time.
+                  {lastAcceptedAt ? `Accepted ${new Date(lastAcceptedAt).toLocaleString()}. ` : ''}
+                  The server cannot determine whether the DevTools panel is still open.
                 </div>
               </div>
             </>
-          ) : chromeConnected && !tiktokTabFound ? (
+          ) : isDevtoolsMode ? (
             <>
-              <span className="status-dot yellow" />
+              <span className="status-dot yellow" aria-hidden="true" />
               <div>
-                <div className="status-text" style={{ color: 'var(--status-yellow)' }}>Chrome Attached, Awaiting TikTok</div>
-                <div className="status-details">
-                  Chrome debugger active on port 9222, but no active TikTok chat page was detected.
-                </div>
+                <div className="status-text" style={{ color: 'var(--status-yellow)' }}>Awaiting opt-in DevTools capture</div>
+                <div className="status-details">Open DevTools before the sticker loads, select the Sticker Capture panel, and keep it open. No DOM automation or CDN refetch is used.</div>
               </div>
             </>
           ) : (
             <>
-              <span className="status-dot red" />
+              <span className="status-dot green" aria-hidden="true" />
               <div>
-                <div className="status-text" style={{ color: 'var(--status-red)' }}>Chrome Debugger Offline</div>
-                <div className="status-details">
-                  Close all Chrome windows and restart Chrome in debugging mode on port 9222.
-                </div>
+                <div className="status-text" style={{ color: 'var(--accent-emerald)' }}>Offline mode · manual import</div>
+                <div className="status-details">Local files are the default path and do not contact TikTok. Manual imports never make live capture appear ready.</div>
               </div>
             </>
           )}
         </div>
 
-        {!chromeConnected && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'flex-end', maxWidth: '500px' }}>
-            <div className="cmd-box">
-              <span>start chrome.exe --remote-debugging-port=9222 "https://www.tiktok.com/messages"</span>
-              <button className="copy-btn" onClick={copyCommand}>
-                {copySuccess ? <Check size={14} /> : <Copy size={14} />}
-              </button>
-            </div>
-            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-              Or double-click <code style={{ color: 'var(--accent-fuchsia)' }}>start-chrome.bat</code> in the project root!
-            </span>
+        <div className="status-actions">
+          <div className="cmd-box">
+            <span>{isDevtoolsMode ? 'DevTools → Sticker Capture → keep panel open' : 'Offline default → drop local media below'}</span>
           </div>
-        )}
-
-        {chromeConnected && !tiktokTabFound && (
-          <a 
-            href="https://www.tiktok.com/messages" 
-            target="_blank" 
-            rel="noreferrer"
-            className="download-btn"
-            style={{ padding: '10px 20px', textDecoration: 'none', fontSize: '0.82rem', boxShadow: 'none' }}
-          >
-            Open TikTok Chats <ExternalLink size={14} />
-          </a>
-        )}
+          <div className="status-action-row">
+            {isDevtoolsMode && sessionInfo && (
+              <button
+                type="button"
+                className="download-btn compact-btn"
+                onClick={handleResetSession}
+                disabled={bootstrapState !== 'ready'}
+              >
+                Reset capture budget
+              </button>
+            )}
+            {isDevtoolsMode && (
+              <a
+                href="https://www.tiktok.com/messages"
+                target="_blank"
+                rel="noreferrer"
+                className="download-btn compact-btn"
+              >
+                Open TikTok Chats <ExternalLink size={14} />
+              </a>
+            )}
+          </div>
+          <span className="status-footnote">
+            {isDevtoolsMode
+              ? 'Residual account and policy risk remains; live capture is never ban-safe.'
+              : 'HAR response bodies are not guaranteed; use manual media import unless a local capability test succeeds.'}
+            {sessionInfo && isDevtoolsMode
+              ? ` Session ${sessionInfo.captureCount || 0}/${sessionInfo.maxCaptures || '—'}.`
+              : ''}
+            {storageIssueCount > 0 ? ` Storage health reports ${storageIssueCount} item(s) needing review.` : ''}
+          </span>
+        </div>
       </div>
 
-      {/* Visual Folder Path Indicator (Active Save Folder) */}
+      {/* Server-reported storage path; never assume a drive or project location. */}
       <div className="folder-indicator-bar">
         <div className="folder-path-container">
           <div className="folder-icon-wrapper">
-            <Folder size={18} />
+            <Folder size={18} aria-hidden="true" />
           </div>
           <div className="folder-path-info">
-            <div className="folder-path-label">Active Save Directory</div>
-            <div className="folder-path-value">
-              <span>D:\Projects\stickers\output\</span>
-              <span className="highlight-date">{getTodayFolder()}</span>
+            <div className="folder-path-label">Active storage root</div>
+            <div className="folder-path-value" title={outputRootPath}>
+              <span>{outputRootPath}</span>
             </div>
           </div>
         </div>
-        <button className="folder-copy-btn" onClick={copyFolderPath}>
+        <button type="button" className="folder-copy-btn" onClick={copyFolderPath}>
           {folderCopySuccess ? (
             <>
-              <Check size={14} style={{ color: 'var(--accent-emerald)' }} />
+              <Check size={14} style={{ color: 'var(--accent-emerald)' }} aria-hidden="true" />
               <span style={{ color: 'var(--accent-emerald)' }}>Copied!</span>
             </>
           ) : (
             <>
-              <Copy size={14} />
-              <span>Copy Path</span>
+              <Copy size={14} aria-hidden="true" />
+              <span>Copy path</span>
             </>
           )}
         </button>
@@ -619,44 +963,112 @@ export default function App() {
 
       {/* Main Section */}
       <main className="main-section">
+
+        {/* Manual import — local files only, no TikTok */}
+        <div
+          className={`manual-import-zone glass-panel ${manualDragOver ? 'drag-over' : ''} ${manualImporting ? 'importing' : ''}`}
+          role="region"
+          aria-label="Manual local sticker import"
+          aria-busy={manualImporting}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setManualDragOver(true);
+          }}
+          onDragLeave={() => setManualDragOver(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setManualDragOver(false);
+            handleManualFiles(e.dataTransfer.files);
+          }}
+        >
+          <div className="manual-import-icon">
+            <Upload size={28} />
+          </div>
+          <div className="manual-import-copy">
+            <h3>Manual sticker import</h3>
+            <p>
+              Drop <strong>png / jpg / webp / gif / mp4 / webm</strong> here — converts locally for Telegram.
+              No TikTok connection. Safest path (zero account risk).
+            </p>
+            <label className="manual-auto-convert">
+              <input
+                type="checkbox"
+                checked={manualAutoConvert}
+                onChange={(e) => setManualAutoConvert(e.target.checked)}
+              />
+              Auto-convert to Telegram format after import
+            </label>
+          </div>
+          <div className="manual-import-actions">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".png,.jpg,.jpeg,.webp,.gif,.tif,.tiff,.avif,.mp4,.webm,.mov,.mkv,.m4v,image/*,video/*"
+              style={{ display: 'none' }}
+              onChange={(e) => handleManualFiles(e.target.files)}
+            />
+            <button
+              type="button"
+              className="download-btn"
+              disabled={manualImporting || bootstrapState !== 'ready'}
+              onClick={() => fileInputRef.current?.click()}
+              style={{ padding: '10px 18px', fontSize: '0.85rem' }}
+            >
+              <FileImage size={16} />
+              {manualImporting ? 'Importing…' : 'Choose files'}
+            </button>
+          </div>
+        </div>
         
         {/* Glow Search Filter Container */}
         <div className="search-container">
-          <input 
-            type="text" 
-            placeholder="🔍 Search stickers by ID, filenames, or manual tags..."
+          <label className="sr-only" htmlFor="sticker-search">Search stickers</label>
+          <input
+            id="sticker-search"
+            type="search"
+            placeholder="Search stickers by ID, filename, or manual tags…"
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onChange={(event) => { setSearchQuery(event.target.value); setVisibleCount(PAGE_SIZE); }}
             className="search-input"
           />
         </div>
 
         {/* Filters and Actions */}
         <div className="filter-bar">
-          <div className="tabs">
+          <div className="tabs" role="group" aria-label="Sticker type filter">
             <button 
               className={`tab-btn ${activeTab === 'all' ? 'active' : ''}`}
-              onClick={() => setActiveTab('all')}
+              onClick={() => { setActiveTab('all'); setVisibleCount(PAGE_SIZE); }}
+              aria-pressed={activeTab === 'all'}
             >
               All Intercepted
             </button>
             <button 
               className={`tab-btn ${activeTab === 'static' ? 'active' : ''}`}
-              onClick={() => setActiveTab('static')}
+              onClick={() => { setActiveTab('static'); setVisibleCount(PAGE_SIZE); }}
+              aria-pressed={activeTab === 'static'}
             >
               Static ({staticCount})
             </button>
             <button 
               className={`tab-btn ${activeTab === 'animated' ? 'active' : ''}`}
-              onClick={() => setActiveTab('animated')}
+              onClick={() => { setActiveTab('animated'); setVisibleCount(PAGE_SIZE); }}
+              aria-pressed={activeTab === 'animated'}
             >
               Animated ({animatedCount})
             </button>
           </div>
 
           {stickers.length > 0 && (
-            <button className="clear-btn" onClick={handleClearAll}>
-              <Trash2 size={16} /> Clear Session
+            <button
+              type="button"
+              className="archive-btn"
+              onClick={handleArchiveLibrary}
+              disabled={archiving || bootstrapState !== 'ready'}
+              title="Copy the current database and media to a dated archive; the active library remains unchanged"
+            >
+              <Archive size={16} aria-hidden="true" /> {archiving ? 'Creating snapshot...' : 'Create archive snapshot'}
             </button>
           )}
         </div>
@@ -665,13 +1077,9 @@ export default function App() {
         {filteredStickers.length === 0 ? (
           <div className="glass-panel empty-state">
             <Layers className="empty-icon" size={56} />
-            <h3 className="empty-title">No Stickers Intercepted Yet</h3>
+            <h3 className="empty-title">No Stickers Yet</h3>
             <p className="empty-subtitle">
-              {chromeConnected && tiktokTabFound ? (
-                "The grabber engine is ready. Navigate through TikTok chats or scroll stickers on the chat drawer to intercept them automatically in real-time!"
-              ) : (
-                "Start Chrome with debugging and launch TikTok messages. Loaded stickers will instantly stream into this cyber grid."
-              )}
+              Drop local images or videos above. Optional live capture works only through a manually opened DevTools Sticker Capture panel.
             </p>
           </div>
         ) : (
@@ -688,19 +1096,39 @@ export default function App() {
                   {stickersByDate[date].map((sticker) => {
                     const stickerDuration = getStickerDuration(sticker);
                     const isLongDuration = sticker.isAnimated && stickerDuration > 3.0;
-                    const selectedStart = selectedStartTimes[sticker.id] || 0;
+                    const persistedRange = getPersistedRange(sticker);
+                    const maxSliceStart = Math.max(0, stickerDuration - 3.0);
+                    const selectedStart = Math.min(
+                      maxSliceStart,
+                      Math.max(0, selectedStartTimes[sticker.id] ?? persistedRange.start)
+                    );
                     const selectedEnd = Math.min(stickerDuration, selectedStart + 3.0);
-                    
+                    const hasPersistedRange = Boolean(
+                      sticker.selectedRange
+                      || sticker.renderedRange
+                      || sticker.conversion?.range
+                      || Number.isFinite(Number(sticker.selectedStartTime))
+                      || Number.isFinite(Number(sticker.startTime))
+                      || Number.isFinite(Number(sticker.conversion?.startTime))
+                    );
+                    const renderedStart = hasPersistedRange
+                      ? Math.min(stickerDuration, Math.max(0, persistedRange.start))
+                      : selectedStart;
+                    const renderedEnd = hasPersistedRange
+                      ? Math.min(stickerDuration, Math.max(renderedStart, persistedRange.end))
+                      : selectedEnd;
                     const isTagEditing = editingTags[sticker.id] !== undefined;
 
                     return (
                       <div key={sticker.id} className={`glass-panel glass-panel-interactive sticker-card status-${sticker.status}`}>
                         {/* Sticker Preview Container */}
                         <div className="sticker-preview-container">
-                          <img 
-                            src={`${API_URL}/captured/${sticker.capturedDate || 'default'}/${sticker.originalFilename}`} 
-                            alt="Captured sticker" 
+                          <img
+                            src={getOriginalPath(sticker)}
+                            alt={`Sticker ${String(sticker.id || '').slice(0, 8)}`}
                             className="sticker-img"
+                            loading="lazy"
+                            decoding="async"
                           />
                           <div className={`sticker-badge ${sticker.isAnimated ? 'animated' : 'static'}`}>
                             {sticker.isAnimated ? (
@@ -719,14 +1147,14 @@ export default function App() {
                         <div className="sticker-info">
                           <div>
                             <div className="sticker-meta">
-                              <span>ID: sticker_{sticker.id.substring(0, 8)}</span>
+                              <span>ID: sticker_{String(sticker.id || '').slice(0, 8)}</span>
                               <span>{sticker.width}x{sticker.height} px</span>
                             </div>
                             
                             {sticker.isAnimated && (
                               <div className="sticker-meta" style={{ marginTop: '4px', color: 'var(--text-secondary)' }}>
                                 <span>Frames: {sticker.frames}</span>
-                                <span>Duration: {stickerDuration.toFixed(1)}s</span>
+                                <span>Duration: {stickerDuration.toFixed(2)}s</span>
                               </div>
                             )}
 
@@ -752,6 +1180,7 @@ export default function App() {
                                     if (e.key === 'Enter') handleSaveTags(sticker.id);
                                   }}
                                   className="tag-edit-input"
+                                  aria-label={`Tags for sticker ${String(sticker.id || '').slice(0, 8)}`}
                                 />
                                 <button className="tag-save-btn" onClick={() => handleSaveTags(sticker.id)}>Save</button>
                               </div>
@@ -765,47 +1194,47 @@ export default function App() {
                               </button>
                             )}
 
-                            {/* Interactive Time Range Slider for Animated Stickers longer than 3 seconds */}
-                            {isLongDuration && sticker.status === 'captured' && (
+                            {/* Select the next slice independently from the persisted rendered range. */}
+                            {isLongDuration && sticker.status !== 'converting' && (
                               <div className="time-slider-container">
                                 <div className="time-slider-header">
                                   <span className="time-slider-title">
-                                    <Clock size={12} style={{ color: 'var(--accent-fuchsia)' }} /> 3-Sec Slice Selector
+                                    <Clock size={12} style={{ color: 'var(--accent-fuchsia)' }} aria-hidden="true" />
+                                    {sticker.status === 'converted' ? 'Next 3-second slice' : '3-second slice'}
                                   </span>
                                   <span className="time-slider-value">
-                                    {selectedStart.toFixed(1)}s - {selectedEnd.toFixed(1)}s
+                                    {selectedStart.toFixed(2)}s – {selectedEnd.toFixed(2)}s
                                   </span>
                                 </div>
                                 <div className="time-slider-wrapper">
-                                  <input 
+                                  <input
                                     type="range"
                                     min={0}
-                                    max={stickerDuration - 3.0}
-                                    step={0.1}
+                                    max={maxSliceStart}
+                                    step={0.05}
                                     value={selectedStart}
-                                    onChange={(e) => {
-                                      const val = parseFloat(e.target.value);
-                                      setSelectedStartTimes(prev => ({
-                                        ...prev,
-                                        [sticker.id]: val
+                                    onChange={(event) => {
+                                      const value = Number.parseFloat(event.target.value);
+                                      setSelectedStartTimes((previous) => ({
+                                        ...previous,
+                                        [sticker.id]: value
                                       }));
                                     }}
                                     className="custom-range-slider"
-                                    title="Drag to select the 3-second chunk of animation to extract"
+                                    aria-label={`Start time for sticker ${String(sticker.id || '').slice(0, 8)}`}
                                   />
                                 </div>
                               </div>
                             )}
 
-                            {/* Show active extraction chunk description after conversion */}
                             {isLongDuration && sticker.status === 'converted' && (
-                              <div className="time-slider-container" style={{ background: 'rgba(16, 185, 129, 0.05)', borderColor: 'rgba(16, 185, 129, 0.15)' }}>
+                              <div className="time-slider-container rendered-range">
                                 <div className="time-slider-header">
                                   <span className="time-slider-title" style={{ color: 'var(--accent-emerald)' }}>
-                                    <CheckCircle size={12} /> Rendered Slice:
+                                    <CheckCircle size={12} aria-hidden="true" /> Rendered slice
                                   </span>
-                                  <span className="time-slider-value" style={{ color: 'var(--accent-emerald)', background: 'rgba(16, 185, 129, 0.12)', borderColor: 'rgba(16, 185, 129, 0.2)' }}>
-                                    {selectedStart.toFixed(1)}s - {selectedEnd.toFixed(1)}s
+                                  <span className="time-slider-value rendered-range-value">
+                                    {renderedStart.toFixed(2)}s – {renderedEnd.toFixed(2)}s
                                   </span>
                                 </div>
                               </div>
@@ -850,18 +1279,7 @@ export default function App() {
                             {/* Secondary Actions */}
                             <div className="secondary-actions">
                               <button 
-                                onClick={() => {
-                                  // Open Canvas Editor Modal
-                                  setEditorScale(1.0);
-                                  setEditorRotation(0);
-                                  setEditorTopText('');
-                                  setEditorBottomText('');
-                                  setEditorStrokeActive(false);
-                                  setEditorStrokeWidth(6);
-                                  setEditorStrokeColor('#ffffff');
-                                  setEditorActiveFrame(0);
-                                  setEditingSticker(sticker);
-                                }}
+                                onClick={(event) => openEditor(sticker, event.currentTarget)}
                                 className="action-btn-mini"
                                 style={{ color: 'var(--accent-fuchsia)', borderColor: 'rgba(217, 70, 239, 0.2)' }}
                                 title="Open in transparent HTML5 canvas editor"
@@ -888,6 +1306,15 @@ export default function App() {
                 </div>
               </div>
             ))}
+            {visibleCount < filteredStickers.length && (
+              <button
+                type="button"
+                className="load-more-btn"
+                onClick={() => setVisibleCount((count) => count + PAGE_SIZE)}
+              >
+                Load {Math.min(PAGE_SIZE, filteredStickers.length - visibleCount)} more stickers
+              </button>
+            )}
           </div>
         )}
 
@@ -898,13 +1325,13 @@ export default function App() {
             <div>
               <h4>Stickers Export & Upload Guide</h4>
               <p style={{ marginTop: '4px' }}>
-                All parsed stickers are automatically saved to your premium workspace output directories:
+                Converted files are saved to the directories reported by the local server:
                 <br />
-                • Animated WEBMs: <code style={{ color: 'var(--accent-fuchsia)' }}>D:\Projects\stickers\output\animated</code>
+                • Animated WebM: <code style={{ color: 'var(--accent-fuchsia)' }}>{getOutputPath('animated')}</code>
                 <br />
-                • Static WebPs: <code style={{ color: 'var(--accent-emerald)' }}>D:\Projects\stickers\output\statics</code>
+                • Static WebP: <code style={{ color: 'var(--accent-emerald)' }}>{getOutputPath('statics')}</code>
                 <br />
-                Simply open the official Telegram <a href="https://t.me/stickers" target="_blank" rel="noreferrer" style={{ color: 'var(--accent-purple)', fontWeight: 700, textDecoration: 'none' }}>@Stickers</a> bot, send the <code style={{ color: 'var(--accent-cyan)' }}>/newpack</code> or <code style={{ color: 'var(--accent-cyan)' }}>/newvideo</code> command, and drag-and-drop these files straight from the save folders!
+                Upload them manually through the official Telegram <a href="https://t.me/stickers" target="_blank" rel="noreferrer" style={{ color: 'var(--accent-purple)', fontWeight: 700, textDecoration: 'none' }}>@Stickers</a> bot. This application never publishes to Telegram automatically.
               </p>
             </div>
           </div>
@@ -915,8 +1342,14 @@ export default function App() {
           Creative HTML5 Canvas Editor Modal overlay
           ---------------------------------------------------- */}
       {editingSticker && (
-        <div className="editor-modal-backdrop">
-          <div className="editor-modal-container glass-panel">
+        <div className="editor-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setEditingSticker(null); }}>
+          <div
+            ref={modalRef}
+            className="editor-modal-container glass-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="editor-modal-title"
+          >
             <div className="editor-modal-content">
               
               {/* Left Pane - Drawing Canvas & Frame controls */}
@@ -929,6 +1362,8 @@ export default function App() {
                     width={512} 
                     height={512} 
                     className="canvas-preview"
+                    role="img"
+                    aria-label="Preview of the customized sticker"
                   />
                 </div>
 
@@ -947,6 +1382,7 @@ export default function App() {
                       onChange={(e) => setEditorActiveFrame(parseInt(e.target.value))}
                       className="custom-range-slider"
                       style={{ background: 'rgba(6, 182, 212, 0.15)' }}
+                      aria-label="Preview animation frame"
                     />
                   </div>
                 )}
@@ -959,12 +1395,15 @@ export default function App() {
               {/* Right Pane - Creative Sliders & Options controls */}
               <div className="editor-right">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <h3 style={{ fontSize: '1.2rem', background: 'var(--gradient-cyber)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+                  <h3 id="editor-modal-title" style={{ fontSize: '1.2rem', background: 'var(--gradient-cyber)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
                     Sticker Customizer
                   </h3>
-                  <button 
+                  <button
+                    ref={modalCloseRef}
+                    type="button"
                     onClick={() => setEditingSticker(null)}
-                    style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: '1.2rem' }}
+                    className="editor-close-btn"
+                    aria-label="Close sticker editor"
                   >
                     &times;
                   </button>
@@ -984,6 +1423,7 @@ export default function App() {
                     value={editorScale}
                     onChange={(e) => setEditorScale(parseFloat(e.target.value))}
                     className="custom-range-slider"
+                    aria-label="Sticker scale"
                   />
                 </div>
 
@@ -998,8 +1438,9 @@ export default function App() {
                     max={180}
                     step={5}
                     value={editorRotation}
-                    onChange={(e) => setEditorRotation(parseInt(e.target.value))}
+                    onChange={(e) => setEditorRotation(parseInt(e.target.value, 10))}
                     className="custom-range-slider"
+                    aria-label="Sticker rotation in degrees"
                   />
                 </div>
 
@@ -1031,8 +1472,9 @@ export default function App() {
                         max={20}
                         step={1}
                         value={editorStrokeWidth}
-                        onChange={(e) => setEditorStrokeWidth(parseInt(e.target.value))}
+                        onChange={(e) => setEditorStrokeWidth(parseInt(e.target.value, 10))}
                         className="custom-range-slider"
+                        aria-label="Outline stroke width"
                       />
                     </div>
 
@@ -1043,6 +1485,7 @@ export default function App() {
                           type="color"
                           value={editorStrokeColor}
                           onChange={(e) => setEditorStrokeColor(e.target.value)}
+                          aria-label="Outline stroke color"
                           style={{ border: 'none', width: '36px', height: '36px', cursor: 'pointer', background: 'transparent' }}
                         />
                         <span style={{ fontSize: '0.8rem', fontFamily: 'monospace' }}>{editorStrokeColor.toUpperCase()}</span>
@@ -1062,6 +1505,7 @@ export default function App() {
                     value={editorTopText}
                     onChange={(e) => setEditorTopText(e.target.value)}
                     className="editor-input"
+                    aria-label="Top text overlay"
                   />
                 </div>
 
@@ -1073,18 +1517,21 @@ export default function App() {
                     value={editorBottomText}
                     onChange={(e) => setEditorBottomText(e.target.value)}
                     className="editor-input"
+                    aria-label="Bottom text overlay"
                   />
                 </div>
 
                 {/* Saving / Apply Buttons */}
                 <div style={{ display: 'flex', gap: '12px', marginTop: 'auto', paddingTop: '20px' }}>
-                  <button 
+                  <button
+                    type="button"
                     onClick={() => setEditingSticker(null)}
                     style={{ flex: 1, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '12px', padding: '12px', color: 'white', cursor: 'pointer', fontWeight: 600 }}
                   >
                     Cancel
                   </button>
-                  <button 
+                  <button
+                    type="button"
                     onClick={handleSaveEdit}
                     disabled={editorSaving}
                     className="download-btn success"
@@ -1111,7 +1558,7 @@ export default function App() {
 
       {/* Premium Toast Notification */}
       {toastMessage && (
-        <div className="toast glass-panel">
+        <div className="toast glass-panel" role="status" aria-live="polite" aria-atomic="true">
           {toastMessage.includes('❌') ? (
             <AlertTriangle size={18} style={{ color: 'var(--status-red)' }} />
           ) : (

@@ -1,8 +1,13 @@
 .agents
 .antigravitycli
 .chrome-profile
+.env
+.env.*
+!.env.example
+.recovery/
 frontend/node_modules
 frontend/dist
 node_modules
 output/
-temp
+temp/
+test_output/

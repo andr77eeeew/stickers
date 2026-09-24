@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "TikTok DM Sticker Capture",
+  "version": "2.0.0",
+  "description": "Captures already-loaded TikTok DM sticker response bodies from an explicitly opened DevTools window and sends them only to the local Sticker Powerhouse server.",
+  "permissions": ["storage", "alarms"],
+  "host_permissions": [
+    "http://127.0.0.1:3001/*",
+    "http://localhost:3001/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "devtools_page": "devtools.html",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "TikTok DM Sticker Capture"
+  }
+}

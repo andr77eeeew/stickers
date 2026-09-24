@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sticker Capture</title>
+  <link rel="stylesheet" href="panel.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>Sticker Capture</h1>
+        <p>Reads completed DevTools response bodies. It never refetches TikTok media.</p>
+      </div>
+      <label class="switch">
+        <input id="captureEnabled" type="checkbox" />
+        <span>Capture enabled</span>
+      </label>
+    </header>
+
+    <section class="status-grid" aria-live="polite">
+      <article>
+        <span>DevTools listener</span>
+        <strong id="listenerState">Checking...</strong>
+      </article>
+      <article>
+        <span>Local server</span>
+        <strong id="serverState">Checking...</strong>
+      </article>
+      <article>
+        <span>Durable queue</span>
+        <strong id="queueState">0</strong>
+      </article>
+      <article>
+        <span>Delivered</span>
+        <strong id="deliveredCount">0</strong>
+      </article>
+    </section>
+
+    <section class="activity">
+      <h2>Last activity</h2>
+      <p id="lastEvent">No capture events yet.</p>
+      <p id="lastError" class="error" hidden></p>
+      <button id="retryQueue" type="button">Retry blocked items now</button>
+    </section>
+
+    <aside>
+      Open DevTools before the sticker response loads. Keep this DevTools
+      window open; do not automate clicks, scrolling, or chat actions.
+    </aside>
+  </main>
+  <script src="panel.js"></script>
+</body>
+</html>
