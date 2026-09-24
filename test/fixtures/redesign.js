@@ -40,8 +40,8 @@ function makeStageFixture() {
     makeStickerFixture(0, { status: 'captured', convertedPath: undefined }),
     makeStickerFixture(1, { status: 'failed', convertedPath: undefined }),
     makeStickerFixture(2, { status: 'converted' }),
-    makeStickerFixture(3, { status: 'converted', convertedPath: undefined, health: { missingConverted: true } }),
-    makeStickerFixture(4, { status: 'captured', originalPath: undefined, health: { missingOriginal: true } })
+    makeStickerFixture(3, { status: 'converted', health: ['missing_converted'] }),
+    makeStickerFixture(4, { status: 'captured', health: ['missing_original'] })
   ];
 }
 

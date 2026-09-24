@@ -17,6 +17,6 @@ test('redesign stage fixture covers pending, failed, converted and missing-media
   assert.deepEqual(stages.map((sticker) => sticker.status), [
     'captured', 'failed', 'converted', 'converted', 'captured'
   ]);
-  assert.equal(stages[3].health.missingConverted, true);
-  assert.equal(stages[4].health.missingOriginal, true);
+  assert.deepEqual(stages[3].health, ['missing_converted']);
+  assert.deepEqual(stages[4].health, ['missing_original']);
 });
