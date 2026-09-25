@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const sharp = require('sharp');
 const multer = require('multer');
 const conversionQueue = require('./ConversionQueue');
+const { JobRegistry } = require('./lib/jobRegistry');
 const {
   ANIMATED_SIZE_LIMIT,
   MAX_DURATION_MS,
@@ -218,6 +219,17 @@ function toClientSticker(sticker) {
 }
 
 const STICKER_MESSAGE_TYPES = new Set(['new_sticker', 'sticker_update']);
+const SERVER_STARTED_AT = new Date().toISOString();
+
+// Batch job history is in memory only; clients are told it resets on restart.
+const jobRegistry = new JobRegistry({
+  maxJobs: 20,
+  onChange: (job) => broadcast({ type: 'job_update', data: job })
+});
+
+function getJobsPayload() {
+  return { jobs: jobRegistry.list(), historyScope: 'server-process', serverStartedAt: SERVER_STARTED_AT };
+}
 
 function broadcast(message) {
   const payload = JSON.stringify(STICKER_MESSAGE_TYPES.has(message.type)
@@ -1078,18 +1090,25 @@ async function promoteCandidateAndPersist({
   }
 }
 
+// Every conversion for one sticker shares the queue key, so single requests
+// and batch jobs never convert the same ID concurrently.
+function enqueueConversion(sticker, job, { beforeStart = null } = {}) {
+  return conversionQueue.enqueue(async () => {
+    if (beforeStart && beforeStart() === false) return null;
+    const snapshot = snapshotConversionState(sticker);
+    markConversionStarted(sticker);
+    try {
+      return await job(snapshot);
+    } catch (error) {
+      recordConversionFailure(sticker, snapshot, error);
+      throw error;
+    }
+  }, { key: sticker.id });
+}
+
 async function runQueuedConversion(res, sticker, job) {
   try {
-    const result = await conversionQueue.enqueue(async () => {
-      const snapshot = snapshotConversionState(sticker);
-      markConversionStarted(sticker);
-      try {
-        return await job(snapshot);
-      } catch (error) {
-        recordConversionFailure(sticker, snapshot, error);
-        throw error;
-      }
-    }, { key: sticker.id });
+    const result = await enqueueConversion(sticker, job);
     return res.json({ success: true, sticker: toClientSticker(result) });
   } catch (error) {
     const queueFull = error.message === 'Conversion queue is full';
@@ -1145,6 +1164,122 @@ function decodePngDataUri(value) {
   return buffer;
 }
 
+function originalInputPath(sticker) {
+  return resolveUnder(
+    OUTPUT_DIR,
+    path.join('captured', sticker.capturedDate || getTodayDateStr(), sticker.originalFilename)
+  );
+}
+
+// Converts one sticker to its Telegram format. Must run inside enqueueConversion.
+async function performConversion({ sticker, requestedRange, inputPath, snapshot }) {
+  let jobDirectory;
+  try {
+    jobDirectory = await createJobDirectory(TEMP_DIR, 'convert', sticker.id);
+    const { metadata, pages, dimensions } = await loadConversionMetadata(inputPath);
+    const dateStr = sticker.capturedDate || getTodayDateStr();
+
+    if (pages > 1) {
+      const allDelays = delaysForConversion(metadata, sticker, pages);
+      const selected = selectFrameRange({
+        delays: allDelays,
+        ...requestedRange,
+        maxDurationMs: MAX_DURATION_MS
+      });
+      const range = buildRangeMetadata(allDelays, selected);
+
+      for (let frameIndex = selected.start; frameIndex <= selected.end; frameIndex += 1) {
+        const relativeIndex = frameIndex - selected.start;
+        const framePath = path.join(
+          jobDirectory,
+          `frame_${String(relativeIndex).padStart(4, '0')}.png`
+        );
+        await sharp(inputPath, {
+          page: frameIndex,
+          limitInputPixels: MAX_DECODED_PIXELS
+        })
+          .resize(dimensions.width, dimensions.height, { fit: 'inside' })
+          .png()
+          .toFile(framePath);
+      }
+
+      const outputFilename = `sticker_${sticker.id}.webm`;
+      const candidatePath = path.join(jobDirectory, outputFilename);
+      const compression = await compressAnimatedWebM(
+        jobDirectory,
+        candidatePath,
+        selected.delays
+      );
+      const sizeBytes = await assertOutputFile(candidatePath, ANIMATED_SIZE_LIMIT);
+      const outputPath = path.join(getAnimatedDir(dateStr), outputFilename);
+      const updates = buildConversionUpdates({
+        kind: 'animated',
+        convertedPath: `/animated/${dateStr}/${outputFilename}`,
+        convertedFilename: outputFilename,
+        range,
+        sizeBytes,
+        details: {
+          encoderMode: compression.mode,
+          sourceFrames: pages
+        }
+      });
+      return promoteCandidateAndPersist({
+        candidatePath,
+        outputPath,
+        sizeLimit: ANIMATED_SIZE_LIMIT,
+        sticker,
+        snapshot,
+        updates
+      });
+    }
+
+    if (
+      (requestedRange.startFrame !== undefined && requestedRange.startFrame !== 0) ||
+      (requestedRange.endFrame !== undefined && requestedRange.endFrame !== 0) ||
+      (requestedRange.startTime !== undefined && requestedRange.startTime !== 0)
+    ) {
+      throw conversionClientError('Static stickers only support frame 0 and startTime 0.');
+    }
+
+    const outputFilename = `sticker_${sticker.id}.webp`;
+    const candidatePath = path.join(jobDirectory, outputFilename);
+    const compression = await compressStaticSticker(
+      inputPath,
+      candidatePath,
+      dimensions.width,
+      dimensions.height
+    );
+    const sizeBytes = await assertOutputFile(candidatePath, STATIC_SIZE_LIMIT);
+    const outputPath = path.join(getStaticsDir(dateStr), outputFilename);
+    const range = {
+      startFrame: 0,
+      endFrame: 0,
+      startTime: 0,
+      durationMs: 0,
+      durationSeconds: 0,
+      frameDelays: []
+    };
+    const updates = buildConversionUpdates({
+      kind: 'static',
+      convertedPath: `/statics/${dateStr}/${outputFilename}`,
+      convertedFilename: outputFilename,
+      range,
+      sizeBytes,
+      details: { quality: compression.quality }
+    });
+    return promoteCandidateAndPersist({
+      candidatePath,
+      outputPath,
+      sizeLimit: STATIC_SIZE_LIMIT,
+      sticker,
+      snapshot,
+      updates
+    });
+  } finally {
+    await removeJobDirectory(jobDirectory);
+  }
+}
+
 // Convert sticker endpoint (supporting cumulative frame ranges)
 app.post('/api/convert', async (req, res) => {
   let sticker;
@@ -1157,121 +1292,17 @@ app.post('/api/convert', async (req, res) => {
     return res.status(error.statusCode || 400).json({ error: error.message });
   }
 
-  const inputPath = resolveUnder(
-    OUTPUT_DIR,
-    path.join('captured', sticker.capturedDate || getTodayDateStr(), sticker.originalFilename)
-  );
+  const inputPath = originalInputPath(sticker);
   if (!fs.existsSync(inputPath)) {
     return res.status(404).json({ error: 'Original sticker file not found on disk.' });
   }
 
-  return runQueuedConversion(res, sticker, async (snapshot) => {
-    let jobDirectory;
-    try {
-      jobDirectory = await createJobDirectory(TEMP_DIR, 'convert', sticker.id);
-      const { metadata, pages, dimensions } = await loadConversionMetadata(inputPath);
-      const dateStr = sticker.capturedDate || getTodayDateStr();
-
-      if (pages > 1) {
-        const allDelays = delaysForConversion(metadata, sticker, pages);
-        const selected = selectFrameRange({
-          delays: allDelays,
-          ...requestedRange,
-          maxDurationMs: MAX_DURATION_MS
-        });
-        const range = buildRangeMetadata(allDelays, selected);
-
-        for (let frameIndex = selected.start; frameIndex <= selected.end; frameIndex += 1) {
-          const relativeIndex = frameIndex - selected.start;
-          const framePath = path.join(
-            jobDirectory,
-            `frame_${String(relativeIndex).padStart(4, '0')}.png`
-          );
-          await sharp(inputPath, {
-            page: frameIndex,
-            limitInputPixels: MAX_DECODED_PIXELS
-          })
-            .resize(dimensions.width, dimensions.height, { fit: 'inside' })
-            .png()
-            .toFile(framePath);
-        }
-
-        const outputFilename = `sticker_${sticker.id}.webm`;
-        const candidatePath = path.join(jobDirectory, outputFilename);
-        const compression = await compressAnimatedWebM(
-          jobDirectory,
-          candidatePath,
-          selected.delays
-        );
-        const sizeBytes = await assertOutputFile(candidatePath, ANIMATED_SIZE_LIMIT);
-        const outputPath = path.join(getAnimatedDir(dateStr), outputFilename);
-        const updates = buildConversionUpdates({
-          kind: 'animated',
-          convertedPath: `/animated/${dateStr}/${outputFilename}`,
-          convertedFilename: outputFilename,
-          range,
-          sizeBytes,
-          details: {
-            encoderMode: compression.mode,
-            sourceFrames: pages
-          }
-        });
-        return promoteCandidateAndPersist({
-          candidatePath,
-          outputPath,
-          sizeLimit: ANIMATED_SIZE_LIMIT,
-          sticker,
-          snapshot,
-          updates
-        });
-      }
-
-      if (
-        (requestedRange.startFrame !== undefined && requestedRange.startFrame !== 0) ||
-        (requestedRange.endFrame !== undefined && requestedRange.endFrame !== 0) ||
-        (requestedRange.startTime !== undefined && requestedRange.startTime !== 0)
-      ) {
-        throw conversionClientError('Static stickers only support frame 0 and startTime 0.');
-      }
-
-      const outputFilename = `sticker_${sticker.id}.webp`;
-      const candidatePath = path.join(jobDirectory, outputFilename);
-      const compression = await compressStaticSticker(
-        inputPath,
-        candidatePath,
-        dimensions.width,
-        dimensions.height
-      );
-      const sizeBytes = await assertOutputFile(candidatePath, STATIC_SIZE_LIMIT);
-      const outputPath = path.join(getStaticsDir(dateStr), outputFilename);
-      const range = {
-        startFrame: 0,
-        endFrame: 0,
-        startTime: 0,
-        durationMs: 0,
-        durationSeconds: 0,
-        frameDelays: []
-      };
-      const updates = buildConversionUpdates({
-        kind: 'static',
-        convertedPath: `/statics/${dateStr}/${outputFilename}`,
-        convertedFilename: outputFilename,
-        range,
-        sizeBytes,
-        details: { quality: compression.quality }
-      });
-      return promoteCandidateAndPersist({
-        candidatePath,
-        outputPath,
-        sizeLimit: STATIC_SIZE_LIMIT,
-        sticker,
-        snapshot,
-        updates
-      });
-    } finally {
-      await removeJobDirectory(jobDirectory);
-    }
-  });
+  return runQueuedConversion(res, sticker, (snapshot) => performConversion({
+    sticker,
+    requestedRange,
+    inputPath,
+    snapshot
+  }));
 });
 
 // Edit and convert static sticker via a validated PNG data URI
@@ -1561,6 +1592,172 @@ app.post('/api/stickers/:id/tags', (req, res) => {
   res.json({ success: true, sticker: toClientSticker(sticker) });
 });
 
+// ----- Batch jobs -----
+
+const MAX_JOB_ITEMS = 100;
+const MAX_BATCH_TAGS = 20;
+const STICKER_ID_PATTERN = /^[a-f0-9]{64}$/i;
+const SYSTEM_TAG_PREFIX = 'import:';
+
+function parseJobIds(value) {
+  if (!Array.isArray(value) || !value.length) {
+    throw conversionClientError('ids must be a non-empty array of sticker IDs.');
+  }
+  if (value.length > MAX_JOB_ITEMS) {
+    throw conversionClientError(`A job can include at most ${MAX_JOB_ITEMS} stickers.`);
+  }
+  const ids = [...new Set(value.map((id) => String(id).toLowerCase()))];
+  if (!ids.every((id) => STICKER_ID_PATTERN.test(id))) {
+    throw conversionClientError('Every id must be a 64-character sticker ID.');
+  }
+  return ids;
+}
+
+function parseJobStartTimes(value) {
+  if (value === undefined || value === null) return {};
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw conversionClientError('startTimes must be an object keyed by sticker ID.');
+  }
+  const startTimes = {};
+  for (const [id, seconds] of Object.entries(value)) {
+    const parsed = parseOptionalFinite(seconds, 'startTimes value', { min: 0 });
+    if (parsed !== undefined) startTimes[id.toLowerCase()] = parsed;
+  }
+  return startTimes;
+}
+
+function parseBatchTags(value, name) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw conversionClientError(`${name} must be an array of tags.`);
+  const tags = [...new Set(value.map((tag) => String(tag).toLowerCase().trim()).filter(Boolean))];
+  if (tags.length > MAX_BATCH_TAGS) throw conversionClientError(`${name} can include at most ${MAX_BATCH_TAGS} tags.`);
+  if (tags.some((tag) => tag.length > 40)) throw conversionClientError('Tags can be at most 40 characters.');
+  if (tags.some((tag) => tag.startsWith(SYSTEM_TAG_PREFIX))) {
+    throw conversionClientError('Import tags are managed by the server and cannot be changed in a batch.');
+  }
+  return tags;
+}
+
+const plural = (count) => (count === 1 ? '' : 's');
+
+app.get('/api/jobs', (_req, res) => {
+  res.json(getJobsPayload());
+});
+
+app.post('/api/jobs/convert', (req, res) => {
+  let ids;
+  let startTimes;
+  try {
+    ids = parseJobIds(req.body?.ids);
+    startTimes = parseJobStartTimes(req.body?.startTimes);
+  } catch (error) {
+    return res.status(error.statusCode || 400).json({ error: error.message });
+  }
+
+  // Resolve eligibility up front so the report explains every skipped ID.
+  const pending = jobRegistry.pendingStickerIds();
+  const plan = ids.map((id) => {
+    const sticker = capturedStickers.find((item) => item.id === id);
+    if (!sticker) return { stickerId: id, state: 'skipped', error: 'Sticker not found.' };
+    if (pending.has(id)) return { stickerId: id, state: 'skipped', error: 'Already queued in another job.' };
+    const inputPath = originalInputPath(sticker);
+    if (!fs.existsSync(inputPath)) return { stickerId: id, state: 'skipped', error: 'Original file is missing on disk.' };
+    return { stickerId: id, state: 'queued', sticker, inputPath };
+  });
+
+  const job = jobRegistry.create('convert', plan, { label: `Convert ${ids.length} sticker${plural(ids.length)}` });
+
+  for (const entry of plan) {
+    if (entry.state !== 'queued') continue;
+    const { sticker, inputPath, stickerId } = entry;
+    const requestedRange = startTimes[stickerId] !== undefined && sticker.isAnimated
+      ? { startTime: startTimes[stickerId] }
+      : {};
+    enqueueConversion(
+      sticker,
+      (snapshot) => performConversion({ sticker, requestedRange, inputPath, snapshot }),
+      {
+        // Cancelled items are dropped here, before any file is touched.
+        beforeStart: () => {
+          if (jobRegistry.itemState(job.id, stickerId) !== 'queued') return false;
+          jobRegistry.setItem(job.id, stickerId, { state: 'running' });
+          return true;
+        }
+      }
+    ).then(
+      (result) => {
+        if (result) jobRegistry.setItem(job.id, stickerId, { state: 'succeeded' });
+      },
+      (error) => {
+        jobRegistry.setItem(job.id, stickerId, {
+          state: 'failed',
+          error: error.message === 'Conversion queue is full'
+            ? 'The conversion queue is full. Try again later.'
+            : error.message
+        });
+      }
+    );
+  }
+
+  return res.status(202).json({ job: jobRegistry.get(job.id) });
+});
+
+app.post('/api/jobs/tags', (req, res) => {
+  let ids;
+  let add;
+  let remove;
+  try {
+    ids = parseJobIds(req.body?.ids);
+    add = parseBatchTags(req.body?.add, 'add');
+    remove = parseBatchTags(req.body?.remove, 'remove');
+    if (!add.length && !remove.length) throw conversionClientError('Provide tags to add or remove.');
+  } catch (error) {
+    return res.status(error.statusCode || 400).json({ error: error.message });
+  }
+
+  const plan = ids.map((id) => {
+    const sticker = capturedStickers.find((item) => item.id === id);
+    return sticker
+      ? { stickerId: id, state: 'running', sticker }
+      : { stickerId: id, state: 'skipped', error: 'Sticker not found.' };
+  });
+  const verb = add.length && remove.length ? 'Update tags on' : add.length ? 'Add tags to' : 'Remove tags from';
+  const job = jobRegistry.create('tags', plan, { label: `${verb} ${ids.length} sticker${plural(ids.length)}` });
+
+  const previousTags = new Map();
+  for (const { sticker } of plan.filter((entry) => entry.sticker)) {
+    previousTags.set(sticker.id, sticker.tags);
+    const current = Array.isArray(sticker.tags) ? sticker.tags : [];
+    sticker.tags = [...new Set([...current.filter((tag) => !remove.includes(tag)), ...add])];
+  }
+
+  try {
+    saveDatabase();
+  } catch (_) {
+    // All-or-nothing: restore every sticker so memory matches the database.
+    for (const [id, tags] of previousTags) {
+      const sticker = capturedStickers.find((item) => item.id === id);
+      if (tags === undefined) delete sticker.tags;
+      else sticker.tags = tags;
+      jobRegistry.setItem(job.id, id, { state: 'failed', error: 'Tags could not be saved; nothing was changed.' });
+    }
+    return res.status(500).json({ error: 'Tags could not be saved; nothing was changed.', job: jobRegistry.get(job.id) });
+  }
+
+  for (const id of previousTags.keys()) {
+    const sticker = capturedStickers.find((item) => item.id === id);
+    broadcast({ type: 'sticker_update', data: sticker });
+    jobRegistry.setItem(job.id, id, { state: 'succeeded' });
+  }
+  return res.json({ job: jobRegistry.get(job.id) });
+});
+
+app.post('/api/jobs/:id/cancel', (req, res) => {
+  const job = jobRegistry.cancel(String(req.params.id));
+  if (!job) return res.status(404).json({ error: 'Job not found. Job history resets when the server restarts.' });
+  return res.json({ job });
+});
+
 // WebSocket Server Handshake
 server.on('upgrade', (request, socket, head) => {
   let pathname = '';
@@ -1585,7 +1782,8 @@ wss.on('connection', (ws) => {
     type: 'init',
     data: {
       ...getStatusPayload(),
-      stickers: capturedStickers.map(toClientSticker)
+      stickers: capturedStickers.map(toClientSticker),
+      ...getJobsPayload()
     }
   }));
 });

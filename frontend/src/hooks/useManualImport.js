@@ -6,7 +6,7 @@ export const IMPORT_ACCEPT = '.png,.jpg,.jpeg,.webp,.gif,.tif,.tiff,.avif,.mp4,.
 export const IMPORT_MAX_FILES = 30;
 
 /** Manual local import — zero TikTok traffic. */
-export function useManualImport({ bootstrapState, setStickers, showToast, handleConvert }) {
+export function useManualImport({ bootstrapState, setStickers, showToast, startConvertJob }) {
   const [manualImporting, setManualImporting] = useState(false);
   const [manualAutoConvert, setManualAutoConvert] = useState(true);
   // Report of the latest batch, straight from the server response. In memory only.
@@ -77,10 +77,11 @@ export function useManualImport({ bootstrapState, setStickers, showToast, handle
         });
       }
 
-      if (manualAutoConvert) {
-        for (const sticker of newOnes) {
-          if (sticker.status === 'captured') await handleConvert(sticker.id);
-        }
+      // One server job converts the batch; the queue bounds concurrency per sticker.
+      const toConvert = newOnes.filter((sticker) => sticker.status === 'captured').map((sticker) => sticker.id);
+      if (manualAutoConvert && toConvert.length) {
+        const job = await startConvertJob(toConvert);
+        if (job) setImportReport((previous) => (previous ? { ...previous, jobId: job.id } : previous));
       }
     } catch (error) {
       console.error('Manual import error:', error);

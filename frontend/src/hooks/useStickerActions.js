@@ -3,6 +3,7 @@ import { apiFetch } from '../lib/api';
 import {
   normalizeMediaPath, getPersistedRange, getOutputPath, getSystemTags, toSafeErrorMessage
 } from '../lib/stickerModel';
+import { upsertJob } from '../lib/jobModel';
 
 const readJson = async (response) => {
   try {
@@ -14,7 +15,7 @@ const readJson = async (response) => {
 
 export function useStickerActions({
   stickers, setStickers, selectedStartTimes, showToast,
-  captureStatus, setCaptureStatus, setSessionInfo, outputPaths
+  captureStatus, setCaptureStatus, setSessionInfo, outputPaths, setJobs
 }) {
   const [archiving, setArchiving] = useState(false);
 
@@ -111,6 +112,44 @@ export function useStickerActions({
     }
   };
 
+  const postJob = async (route, body) => {
+    const response = await apiFetch(route, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const result = await readJson(response);
+    if (result.job) setJobs((previous) => upsertJob(previous, result.job));
+    if (!response.ok) throw new Error(result.error || 'The job could not be started');
+    return result.job;
+  };
+
+  /** Queues a server-side batch conversion; progress arrives as job_update events. */
+  const startConvertJob = async (ids) => {
+    const startTimes = Object.fromEntries(ids
+      .filter((id) => selectedStartTimes[id] !== undefined)
+      .map((id) => [id, selectedStartTimes[id]]));
+    try {
+      const job = await postJob('/api/jobs/convert', { ids, startTimes });
+      showToast(`Queued ${job.counts.queued} of ${job.counts.total} for conversion. Track it in Jobs.`);
+      return job;
+    } catch (error) {
+      showToast(`Could not start conversion: ${toSafeErrorMessage(error.message)}`, 'error');
+      return null;
+    }
+  };
+
+  /** Adds and removes user tags on many stickers. Throws so the dialog can keep its input. */
+  const startTagJob = (ids, add, remove) => postJob('/api/jobs/tags', { ids, add, remove });
+
+  const cancelJob = async (jobId) => {
+    try {
+      await postJob(`/api/jobs/${jobId}/cancel`, {});
+    } catch (error) {
+      showToast(`Could not cancel: ${toSafeErrorMessage(error.message)}`, 'error');
+    }
+  };
+
   const outputPath = (key) => getOutputPath(key, outputPaths, captureStatus.storage);
 
   const copyText = async (text, label = 'Copied') => {
@@ -127,6 +166,7 @@ export function useStickerActions({
   return {
     archiving,
     handleConvert, handleSaveTags, triggerBrowserDownload,
-    handleArchiveLibrary, handleResetSession, outputPath, copyText
+    handleArchiveLibrary, handleResetSession, outputPath, copyText,
+    startConvertJob, startTagJob, cancelJob
   };
 }

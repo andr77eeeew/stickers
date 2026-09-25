@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { apiFetch, getWebSocketUrl } from '../lib/api';
+import { upsertJob } from '../lib/jobModel';
 
 export function useStickerSession() {
   const [stickers, setStickers] = useState([]);
@@ -13,6 +14,9 @@ export function useStickerSession() {
   const [sessionInfo, setSessionInfo] = useState(null);
   const [outputPaths, setOutputPaths] = useState({});
   const [socketConnected, setSocketConnected] = useState(false);
+  // Batch jobs live in server memory; the scope tells the UI how long history lasts.
+  const [jobs, setJobs] = useState([]);
+  const [jobHistory, setJobHistory] = useState({ scope: null, serverStartedAt: null });
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const mountedRef = useRef(false);
@@ -54,6 +58,10 @@ export function useStickerSession() {
           if (type === 'init') {
             applyStatus(data);
             setStickers(data?.stickers || []);
+            setJobs(Array.isArray(data?.jobs) ? data.jobs : []);
+            setJobHistory({ scope: data?.historyScope || null, serverStartedAt: data?.serverStartedAt || null });
+          } else if (type === 'job_update') {
+            setJobs((previous) => upsertJob(previous, data));
           } else if (type === 'status' || type === 'capture_status') {
             applyStatus(data);
           } else if (type === 'new_sticker') {
@@ -145,6 +153,7 @@ export function useStickerSession() {
     captureStatus, setCaptureStatus,
     sessionInfo, setSessionInfo,
     outputPaths, socketConnected,
+    jobs, setJobs, jobHistory,
     retryConnection: () => bootstrapRef.current?.(),
     refreshStatus: () => refreshStatusRef.current?.()
   };

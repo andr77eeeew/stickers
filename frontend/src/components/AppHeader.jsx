@@ -1,12 +1,13 @@
 import { Sparkles, Upload } from 'lucide-react';
 import { StatusPopover } from './StatusPopover';
+import { JobCenterButton } from './JobCenter';
 
 const NAV_ITEMS = [
   { view: 'library', label: 'Library' },
   { view: 'health', label: 'Health' }
 ];
 
-export function AppHeader({ view, onNavigate, onImport, importDisabled, status }) {
+export function AppHeader({ view, onNavigate, onImport, importDisabled, status, jobs, onOpenJobs }) {
   return (
     <header className="app-header">
       <a className="skip-link" href="#main-content">Skip to content</a>
@@ -34,6 +35,7 @@ export function AppHeader({ view, onNavigate, onImport, importDisabled, status }
       </nav>
 
       <div className="header-actions">
+        <JobCenterButton jobs={jobs} onOpen={onOpenJobs} />
         <StatusPopover {...status} onOpenHealth={() => onNavigate('health')} />
         <button type="button" className="btn btn-primary" onClick={onImport} disabled={importDisabled}>
           <Upload size={16} aria-hidden="true" />

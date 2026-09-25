@@ -110,6 +110,16 @@ WebP поддерживается; никакое сообщение «WebP is n
 - Отчёт текущего batch: счётчики `imported`, `duplicates`, `failed` из ответа API и строка на каждый файл (`Accepted`, `Duplicate`, `Failed` + причина). Общий отказ (например 413) показывается одной ошибкой над списком, без выдуманных строк. Результат живёт в памяти панели; persistent history не обещан. `Show in library` закрывает панель и сбрасывает фильтры на `Newest`.
 - HAR UI не включён. Нет облачной загрузки и автоматической публикации в Telegram.
 
+### Selection & Jobs (этап 4)
+
+- **Выбор**: кнопка `Select` в тулбаре переключает сетку в режим выбора — плитки становятся кнопками с `aria-pressed` и чекбоксом, клик отмечает, Shift+клик отмечает диапазон на странице, Escape выходит из режима. Выбор переживает смену страницы и фильтров. Снизу — панель `N selected · Select page · Clear · Convert N · Tags… · ✕`. `Convert N` считает только стикеры, которые сервер может конвертировать сейчас (оригинал на месте, не в работе и не в очереди).
+- **Convert N** в полосе Needs action ставит в одну задачу все проблемные стикеры с доступным оригиналом; при N > 10 сначала открывается диалог подтверждения `Convert N stickers?`.
+- **Задача** (job) — серверная сущность с ID, списком стикеров и состоянием каждого: `queued`, `running`, `succeeded`, `failed`, `skipped` (с причиной: не найден, уже в очереди, нет оригинала), `cancelled`. Итог задачи: `In progress`, `Done`, `Finished with problems`, `Failed`, `Cancelled` (отмена без ошибок не считается проблемой). Прогресс — только наблюдаемые счётчики «N of M finished», без процентов и ETA.
+- **Jobs** — кнопка в шапке (со счётчиком активных задач) открывает боковую панель: последние задачи, полоса исходов, `Cancel N queued` (отменяет только не начатые элементы), список проблемных элементов с понятной причиной и переходом к стикеру. Текст панели честно сообщает, что история хранится в памяти сервера (последние 20 задач) и сбрасывается при его перезапуске; перезагрузка страницы историю не теряет.
+- Плитка стикера в очереди показывает `Queued`; когда сервер берёт его в работу — `Converting…`. По завершении конвертационной задачи — один тост с итогом.
+- **Импорт** с включённым auto-convert создаёт одну задачу на все новые файлы; строки отчёта показывают состояние конвертации каждого файла. Тексты ошибок импорта и конвертации переводятся в понятные формулировки без путей.
+- **Tags…** открывает диалог `Add tags` / `Remove tags` для выбранных; системные `import:` теги защищены и в UI, и на сервере; результат — отчёт по каждому ID.
+
 ### Health
 
 - **Storage**: сводка из `GET /api/status` — `missing original`, `missing output`, `unlinked files`, `temporary entries`, `interrupted conversions` и время последней проверки (`checkedAt`). Категории не складываются в «число повреждённых стикеров». Различаем `No issues found` и `Storage check unavailable`. Кнопка `Refresh summary` перечитывает статус и так и называется. Пока нет read-only endpoint, вместо таблицы — строка `Item-level details are not available yet`; `Missing output` и `Missing original` ведут в библиотеку с фильтром `Needs action`.
@@ -155,7 +165,8 @@ WebP поддерживается; никакое сообщение «WebP is n
 | Каталог, статусы, теги, media | `GET /api/stickers`, WebSocket `init/new_sticker/sticker_update`, `POST /api/stickers/:id/tags` | **Этап 3:** вычисляемое поле `outputSizeBytes` — размер файла результата, измеренный `fs.stat` при отдаче записи; в базу не пишется, `null` при отсутствии файла |
 | Telegram check | `conversion`, `convertedRange`, `durationMs`, `width`/`height` записи | Размеры результата для наследных записей — только отдельной read-only проверкой, не догадкой |
 | Статус сервиса и Storage summary | `GET /api/status`, `GET /api/session` | Достоверный сигнал DevTools listening; детальная проверка файлов (этап 5) |
-| Импорт | `POST /api/import/files` с `imported`, `duplicates`, `failed`, `results` | Batch/job контракт (этап 4) |
+| Импорт | `POST /api/import/files` с `imported`, `duplicates`, `failed`, `results` | — |
+| Задачи | **Этап 4:** `GET /api/jobs`, `POST /api/jobs/convert` (`ids`, опционально `startTimes`), `POST /api/jobs/tags` (`ids`, `add`, `remove`), `POST /api/jobs/:id/cancel`; WebSocket `job_update` и `jobs` в `init` | Постоянная история задач — только если понадобится; сейчас память процесса, до 20 задач |
 | Редактор и output | `/api/stickers/:id/frame/:frameIndex`, `/api/convert`, edit routes | Undo/history при необходимости |
 | Архив | `POST /api/library/archive` | `GET /api/library/archives` и read-only verify (этап 5) |
 | Паки | Отсутствуют | Отдельное атомарное хранилище метаданных паков и export endpoint (этап 7) |

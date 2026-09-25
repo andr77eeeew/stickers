@@ -22,7 +22,8 @@ function ServiceUnavailable({ error, onRetry }) {
 
 export function LibraryView({
   catalogue, viewState, updateView, openSticker, preferences, setPreference,
-  attention, attentionSamples, bootstrapState, bootstrapError, onRetry, onImport, searchRef
+  attention, attentionSamples, bootstrapState, bootstrapError, onRetry, onImport, searchRef,
+  selectionMode, onToggleSelectionMode, selectedIds, onToggleSelected, queuedIds, onConvertAttention, attentionConvertible
 }) {
   const gridRef = useRef(null);
   const { items, total, page, pageCount, counts, libraryTotal } = catalogue;
@@ -62,6 +63,8 @@ export function LibraryView({
         <AttentionBar
           summary={attention}
           samples={attentionSamples}
+          convertibleCount={attentionConvertible}
+          onConvert={onConvertAttention}
           onShow={() => updateView({ status: 'action', type: 'all', q: '', page: 1 }, { push: true })}
         />
       )}
@@ -73,6 +76,8 @@ export function LibraryView({
         onChange={(patch) => updateView(patch)}
         preferences={preferences}
         setPreference={setPreference}
+        selectionMode={selectionMode}
+        onToggleSelectionMode={onToggleSelectionMode}
       />
 
       {showUnavailable ? (
@@ -111,8 +116,8 @@ export function LibraryView({
         <>
           <ul
             ref={gridRef}
-            className={`sticker-grid density-${preferences.density}`}
-            aria-label={`Stickers, page ${page} of ${pageCount}`}
+            className={`sticker-grid density-${preferences.density} ${selectionMode ? 'is-selecting' : ''}`}
+            aria-label={`Stickers, page ${page} of ${pageCount}${selectionMode ? ', selection mode' : ''}`}
             onKeyDown={onGridKeyDown}
           >
             {items.map((sticker, index) => (
@@ -122,6 +127,10 @@ export function LibraryView({
                 selected={sticker.id === viewState.id}
                 eager={index < 12}
                 onOpen={openSticker}
+                selectionMode={selectionMode}
+                checked={selectedIds.has(sticker.id)}
+                onToggle={onToggleSelected}
+                queued={queuedIds.has(sticker.id)}
               />
             ))}
           </ul>

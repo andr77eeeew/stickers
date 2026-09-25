@@ -9,8 +9,8 @@ import { TagEditor } from './TagEditor';
 import {
   getImportName, getOutputMediaPath, getPersistedRange, getShortId, getStickerDuration,
   getStickerState, getTelegramCheck, getUserTags, hasPersistedRange, isOriginalMissing,
-  toSafeErrorMessage
 } from '../lib/stickerModel';
+import { describeFailure } from '../lib/jobModel';
 
 const TONE_ICONS = {
   ok: CircleCheck,
@@ -256,7 +256,7 @@ export function StickerInspector({
         )}
         {convertBlockedReason && <p className="action-note">{convertBlockedReason} Convert and Edit are unavailable.</p>}
         {state === 'failed' && !convertBlockedReason && sticker.error && (
-          <p className="action-note">{toSafeErrorMessage(sticker.error)}</p>
+          <p className="action-note">{describeFailure(sticker.error)}</p>
         )}
       </div>
 

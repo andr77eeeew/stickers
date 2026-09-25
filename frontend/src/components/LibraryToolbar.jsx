@@ -1,5 +1,5 @@
 import { forwardRef } from 'react';
-import { Search, X, LayoutGrid, Grid3x3 } from 'lucide-react';
+import { Search, X, LayoutGrid, Grid3x3, SquareCheck } from 'lucide-react';
 
 const BACKGROUNDS = [
   { value: 'neutral', label: 'Neutral preview background' },
@@ -28,7 +28,7 @@ function Segmented({ label, options, value, onChange, className = '' }) {
 }
 
 export const LibraryToolbar = forwardRef(function LibraryToolbar({
-  viewState, counts, onChange, preferences, setPreference
+  viewState, counts, onChange, preferences, setPreference, selectionMode, onToggleSelectionMode
 }, searchRef) {
   const statusChips = [
     { value: 'all', label: 'All', count: counts.all },
@@ -88,6 +88,10 @@ export const LibraryToolbar = forwardRef(function LibraryToolbar({
         />
 
         <span className="toolbar-spacer" />
+
+        <button type="button" className="btn btn-toolbar" aria-pressed={selectionMode} onClick={onToggleSelectionMode}>
+          <SquareCheck size={16} aria-hidden="true" /> Select
+        </button>
 
         <label className="select-field">
           <span className="sr-only">Sort</span>

@@ -12,9 +12,17 @@ import { StickerInspector } from './components/StickerInspector';
 import { ImportPanel } from './components/ImportPanel';
 import { HealthView } from './components/HealthView';
 import { EditorModal } from './components/EditorModal';
+import { JobCenter } from './components/JobCenter';
+import { SelectionBar } from './components/SelectionBar';
+import { BatchTagsDialog } from './components/BatchTagsDialog';
+import { ConfirmDialog } from './components/ConfirmDialog';
 import {
-  PAGE_SIZE, PAGE_SIZE_DENSE, needsAction, selectCatalogue, summarizeAttention
+  PAGE_SIZE, PAGE_SIZE_DENSE, getStickerState, isOriginalMissing, needsAction, selectCatalogue, summarizeAttention
 } from './lib/stickerModel';
+import { describeFinishedJob, getQueuedStickerIds } from './lib/jobModel';
+
+// One-click batch conversions above this size ask for confirmation first.
+const LARGE_BATCH_CONFIRM = 10;
 
 const hasFiles = (event) => Array.from(event.dataTransfer?.types || []).includes('Files');
 
@@ -22,13 +30,21 @@ export default function App() {
   const session = useStickerSession();
   const {
     stickers, setStickers, bootstrapState, bootstrapError, captureStatus, setCaptureStatus,
-    sessionInfo, setSessionInfo, outputPaths, socketConnected, retryConnection, refreshStatus
+    sessionInfo, setSessionInfo, outputPaths, socketConnected, retryConnection, refreshStatus,
+    jobs, setJobs, jobHistory
   } = session;
   const { viewState, updateView, openSticker, closeSticker } = useViewState();
   const { preferences, setPreference } = usePreferences();
   const [toast, setToast] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
+  const [jobsOpen, setJobsOpen] = useState(false);
+  const [tagsOpen, setTagsOpen] = useState(false);
+  const [pendingConvertIds, setPendingConvertIds] = useState(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const lastToggledRef = useRef(null);
+  const jobStatesRef = useRef(new Map());
   // Selected 3-second window per animated sticker id (seconds).
   const [selectedStartTimes, setSelectedStartTimes] = useState({});
   const toastTimerRef = useRef(null);
@@ -45,9 +61,9 @@ export default function App() {
   const editor = useStickerEditor({ setStickers, selectedStartTimes, showToast });
   const actions = useStickerActions({
     stickers, setStickers, selectedStartTimes, showToast,
-    captureStatus, setCaptureStatus, setSessionInfo, outputPaths
+    captureStatus, setCaptureStatus, setSessionInfo, outputPaths, setJobs
   });
-  const importer = useManualImport({ bootstrapState, setStickers, showToast, handleConvert: actions.handleConvert });
+  const importer = useManualImport({ bootstrapState, setStickers, showToast, startConvertJob: actions.startConvertJob });
   const { handleManualFiles } = importer;
 
   const pageSize = preferences.density === 'dense' ? PAGE_SIZE_DENSE : PAGE_SIZE;
@@ -57,6 +73,91 @@ export default function App() {
   );
   const attention = useMemo(() => summarizeAttention(stickers), [stickers]);
   const attentionSamples = useMemo(() => stickers.filter(needsAction).slice(0, 5), [stickers]);
+  const stickersById = useMemo(() => new Map(stickers.map((sticker) => [sticker.id, sticker])), [stickers]);
+  const queuedIds = useMemo(() => getQueuedStickerIds(jobs), [jobs]);
+  // Only stickers the server can convert now: original present, not already busy.
+  const isConvertible = useCallback((sticker) => Boolean(sticker)
+    && !isOriginalMissing(sticker)
+    && getStickerState(sticker) !== 'converting'
+    && !queuedIds.has(sticker.id), [queuedIds]);
+  const attentionConvertibleIds = useMemo(
+    () => stickers.filter((sticker) => needsAction(sticker) && isConvertible(sticker)).map((sticker) => sticker.id),
+    [stickers, isConvertible]
+  );
+  const selectedConvertibleIds = useMemo(
+    () => [...selectedIds].filter((id) => isConvertible(stickersById.get(id))),
+    [selectedIds, stickersById, isConvertible]
+  );
+  const pageIds = catalogue.items.map((sticker) => sticker.id);
+  const allPageSelected = pageIds.length > 0 && pageIds.every((id) => selectedIds.has(id));
+
+  // Announce each batch conversion once, when the server reports it finished.
+  useEffect(() => {
+    const previous = jobStatesRef.current;
+    for (const job of jobs) {
+      const before = previous.get(job.id);
+      if (before === 'running' && job.state !== 'running' && job.kind === 'convert') {
+        const { message, tone } = describeFinishedJob(job);
+        showToast(message, tone);
+      }
+      previous.set(job.id, job.state);
+    }
+  }, [jobs, showToast]);
+
+  const toggleSelectionMode = () => {
+    setSelectionMode((value) => !value);
+    setSelectedIds(new Set());
+    lastToggledRef.current = null;
+  };
+
+  // Shift+click selects the range on the current page since the last toggle.
+  const toggleSelected = (id, withRange) => {
+    // Read the anchor now: React may run the updater after the ref changes below.
+    const anchor = lastToggledRef.current;
+    setSelectedIds((previous) => {
+      const next = new Set(previous);
+      if (withRange && anchor && pageIds.includes(anchor) && pageIds.includes(id)) {
+        const [from, to] = [pageIds.indexOf(anchor), pageIds.indexOf(id)].sort((a, b) => a - b);
+        pageIds.slice(from, to + 1).forEach((pageId) => next.add(pageId));
+      } else if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+    lastToggledRef.current = id;
+  };
+
+  const togglePageSelection = () => {
+    setSelectedIds((previous) => {
+      const next = new Set(previous);
+      pageIds.forEach((id) => (allPageSelected ? next.delete(id) : next.add(id)));
+      return next;
+    });
+  };
+
+  // Escape leaves selection mode unless a dialog or the inspector handles it first.
+  useEffect(() => {
+    if (!selectionMode) return undefined;
+    const onKeyDown = (event) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (document.querySelector('dialog[open], .editor-modal-backdrop, .inspector')) return;
+      setSelectionMode(false);
+      setSelectedIds(new Set());
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [selectionMode]);
+
+  const convertSelected = async () => {
+    const job = await actions.startConvertJob(selectedConvertibleIds);
+    if (job) {
+      setSelectedIds(new Set());
+      setSelectionMode(false);
+    }
+  };
+
   const selectedSticker = viewState.id ? stickers.find((sticker) => sticker.id === viewState.id) || null : null;
   const inspectorOpen = viewState.view === 'library' && Boolean(viewState.id);
 
@@ -131,6 +232,8 @@ export default function App() {
         onNavigate={navigate}
         onImport={() => setImportOpen(true)}
         importDisabled={bootstrapState !== 'ready'}
+        jobs={jobs}
+        onOpenJobs={() => setJobsOpen(true)}
         status={{
           bootstrapState, bootstrapError, socketConnected, captureStatus, sessionInfo,
           onRetry: retryConnection, onResetBudget: actions.handleResetSession
@@ -168,7 +271,29 @@ export default function App() {
               onRetry={retryConnection}
               onImport={() => setImportOpen(true)}
               searchRef={searchRef}
+              selectionMode={selectionMode}
+              onToggleSelectionMode={toggleSelectionMode}
+              selectedIds={selectedIds}
+              onToggleSelected={toggleSelected}
+              queuedIds={queuedIds}
+              attentionConvertible={attentionConvertibleIds.length}
+              onConvertAttention={() => (attentionConvertibleIds.length > LARGE_BATCH_CONFIRM
+                ? setPendingConvertIds(attentionConvertibleIds)
+                : actions.startConvertJob(attentionConvertibleIds))}
             />
+            {selectionMode && (
+              <SelectionBar
+                count={selectedIds.size}
+                convertibleCount={selectedConvertibleIds.length}
+                pageCount={pageIds.length}
+                allPageSelected={allPageSelected}
+                onTogglePage={togglePageSelection}
+                onConvert={convertSelected}
+                onTags={() => setTagsOpen(true)}
+                onClear={() => setSelectedIds(new Set())}
+                onDone={toggleSelectionMode}
+              />
+            )}
           </main>
           {inspectorOpen && (
             <StickerInspector
@@ -193,10 +318,43 @@ export default function App() {
         onClose={() => setImportOpen(false)}
         {...importer}
         bootstrapState={bootstrapState}
+        jobs={jobs}
+        onOpenJobs={() => { setImportOpen(false); setJobsOpen(true); }}
         onShowInLibrary={() => {
           setImportOpen(false);
           updateView({ view: 'library', q: '', type: 'all', status: 'all', sort: 'newest', page: 1, id: null }, { push: true });
         }}
+      />
+
+      <JobCenter
+        open={jobsOpen}
+        onClose={() => setJobsOpen(false)}
+        jobs={jobs}
+        jobHistory={jobHistory}
+        stickersById={stickersById}
+        onOpenSticker={(id) => updateView({ view: 'library', id }, { push: true })}
+        onCancel={actions.cancelJob}
+      />
+
+      <ConfirmDialog
+        open={Boolean(pendingConvertIds)}
+        title={`Convert ${pendingConvertIds?.length || 0} stickers?`}
+        confirmLabel={`Convert ${pendingConvertIds?.length || 0}`}
+        onCancel={() => setPendingConvertIds(null)}
+        onConfirm={() => {
+          const ids = pendingConvertIds;
+          setPendingConvertIds(null);
+          actions.startConvertJob(ids);
+        }}
+      >
+        <p>Every sticker that needs action and still has its original will be queued as one job and converted two at a time. Existing outputs of these stickers are replaced. You can cancel queued items in Jobs.</p>
+      </ConfirmDialog>
+
+      <BatchTagsDialog
+        open={tagsOpen}
+        onClose={() => setTagsOpen(false)}
+        count={selectedIds.size}
+        onSubmit={(add, remove) => actions.startTagJob([...selectedIds], add, remove)}
       />
 
       <EditorModal {...editor} />

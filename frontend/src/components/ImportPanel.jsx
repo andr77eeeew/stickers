@@ -2,9 +2,10 @@ import { useId, useState } from 'react';
 import { Upload, X, CircleCheck, CircleAlert, Copy as DuplicateIcon, LoaderCircle } from 'lucide-react';
 import { Sheet } from './Sheet';
 import { IMPORT_ACCEPT, IMPORT_MAX_FILES } from '../hooks/useManualImport';
-import { getShortId, toSafeErrorMessage } from '../lib/stickerModel';
+import { getShortId } from '../lib/stickerModel';
+import { ITEM_STATE_LABELS, describeFailure, describeJobProgress } from '../lib/jobModel';
 
-function ResultRow({ entry }) {
+function ResultRow({ entry, jobItem }) {
   const status = !entry.success ? 'failed' : entry.duplicate ? 'duplicate' : 'accepted';
   const Icon = status === 'failed' ? CircleAlert : status === 'duplicate' ? DuplicateIcon : CircleCheck;
   const label = status === 'failed' ? 'Failed' : status === 'duplicate' ? 'Duplicate' : 'Accepted';
@@ -17,18 +18,26 @@ function ResultRow({ entry }) {
       {status === 'duplicate' && entry.sticker && (
         <span className="import-note">Already in library as <span className="mono">{getShortId(entry.sticker)}</span></span>
       )}
-      {status === 'failed' && <span className="import-note">{toSafeErrorMessage(entry.error) || 'The file could not be imported.'}</span>}
+      {status === 'failed' && <span className="import-note">{describeFailure(entry.error) || 'The file could not be imported.'}</span>}
+      {jobItem && (
+        <span className={`import-note conversion-${jobItem.state}`}>
+          Conversion: {ITEM_STATE_LABELS[jobItem.state] || jobItem.state}
+          {jobItem.error ? ` — ${describeFailure(jobItem.error)}` : ''}
+        </span>
+      )}
     </li>
   );
 }
 
 export function ImportPanel({
   open, onClose, manualImporting, manualAutoConvert, setManualAutoConvert,
-  importReport, fileInputRef, handleManualFiles, bootstrapState, onShowInLibrary
+  importReport, fileInputRef, handleManualFiles, bootstrapState, onShowInLibrary, jobs, onOpenJobs
 }) {
   const titleId = useId();
   const [dragOver, setDragOver] = useState(false);
   const report = importReport;
+  const job = report?.jobId ? jobs.find((item) => item.id === report.jobId) : null;
+  const jobItems = new Map((job?.items || []).map((item) => [item.stickerId, item]));
 
   return (
     <Sheet open={open} onClose={onClose} className="sheet sheet-side" labelledBy={titleId}>
@@ -96,8 +105,20 @@ export function ImportPanel({
               <span><strong>{report.duplicates}</strong> duplicates</span>
               <span className={report.failed ? 'tone-problem' : ''}><strong>{report.failed}</strong> failed</span>
             </div>
+            {job && (
+              <p className="small tabular" role="status">
+                Converting for Telegram: {describeJobProgress(job)}{' '}
+                <button type="button" className="link-btn" onClick={onOpenJobs}>Open Jobs</button>
+              </p>
+            )}
             <ul className="import-list">
-              {report.results.map((entry, index) => <ResultRow key={`${entry.name}-${index}`} entry={entry} />)}
+              {report.results.map((entry, index) => (
+                <ResultRow
+                  key={`${entry.name}-${index}`}
+                  entry={entry}
+                  jobItem={entry.sticker && !entry.duplicate ? jobItems.get(entry.sticker.id) : null}
+                />
+              ))}
             </ul>
             {report.imported > 0 && (
               <button type="button" className="btn" onClick={onShowInLibrary}>Show in library</button>
