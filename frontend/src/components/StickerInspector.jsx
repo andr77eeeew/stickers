@@ -142,7 +142,7 @@ export function StickerInspector({
   useEffect(() => {
     const onKeyDown = (event) => {
       if (event.key !== 'Escape' || event.defaultPrevented) return;
-      if (document.querySelector('dialog[open], .editor-modal-backdrop')) return;
+      if (document.querySelector('dialog[open]')) return;
       onClose();
     };
     document.addEventListener('keydown', onKeyDown);

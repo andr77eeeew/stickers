@@ -48,7 +48,7 @@ WebP поддерживается; никакое сообщение «WebP is n
 - **Needs action** вместо страницы Processing: над сеткой библиотеки появляется компактная полоса, только когда есть записи `captured`, `failed` или `converted` с отсутствующим результатом. Полоса показывает раздельные счётчики и кнопку `Show`, которая включает фильтр `Needs action`.
 - **Health** объединяет Storage и Archives: сводка хранилища, создание архива, пути вывода и инструкция по загрузке в Telegram.
 - **DevTools** не является вкладкой. Кнопка состояния открывает popover с различимыми состояниями `Manual import`, `Awaiting opt-in DevTools`, `Last asset accepted`, `Local delivery failed`, `Budget exhausted`, `Disconnected`, сбросом бюджета и ссылкой на Health при проблемах хранилища. Поле `listening: null` **не доказывает**, что DevTools открыт; UI не пишет «Listening». Успешный ручной импорт не меняет live-status.
-- **URL**: `?view=library|health`; в библиотеке `q`, `type` (`all|static|animated`), `status` (`all|ready|action|converting`), `sort` (`newest|oldest|largest`), `page`, `id` (выбранный стикер). Значения по умолчанию из URL не пишутся. Back/Forward восстанавливают вид; смена фильтра/поиска сбрасывает `page`; открытие стикера добавляет запись истории, поэтому Back на mobile закрывает детали и возвращает к прежним фильтрам. Переходы — настоящие ссылки, не кликабельные `div`. Редактор до этапа 5 остаётся модальным окном без URL.
+- **URL**: `?view=library|health|editor`; в библиотеке `q`, `type` (`all|static|animated`), `status` (`all|ready|action|converting`), `sort` (`newest|oldest|largest`), `page`, `id` (выбранный стикер). Значения по умолчанию из URL не пишутся. Back/Forward восстанавливают вид; смена фильтра/поиска сбрасывает `page`; открытие стикера добавляет запись истории, поэтому Back на mobile закрывает детали и возвращает к прежним фильтрам. Переходы — настоящие ссылки, не кликабельные `div`. Редактор — отдельный вид `?view=editor&id=…` (этап 5); выход из него шагает назад по истории и возвращает библиотеку с прежними фильтрами и открытым инспектором.
 
 ## 3. Дизайн-система
 
@@ -122,13 +122,20 @@ WebP поддерживается; никакое сообщение «WebP is n
 
 ### Health
 
-- **Storage**: сводка из `GET /api/status` — `missing original`, `missing output`, `unlinked files`, `temporary entries`, `interrupted conversions` и время последней проверки (`checkedAt`). Категории не складываются в «число повреждённых стикеров». Различаем `No issues found` и `Storage check unavailable`. Кнопка `Refresh summary` перечитывает статус и так и называется. Пока нет read-only endpoint, вместо таблицы — строка `Item-level details are not available yet`; `Missing output` и `Missing original` ведут в библиотеку с фильтром `Needs action`.
-- **Archives**: `Create archive snapshot` с доступным диалогом подтверждения (не `window.confirm`); после успеха — путь и число записей из ответа сервера. Список и `Verify` — после API этапа 5, до этого строка `Archive history is not available yet`. Никакого `Restore`.
+- **Storage**: сводка — `missing original`, `missing output`, `interrupted conversions`, `unlinked files`, `temporary entries` и время последней проверки (`checkedAt`). Категории не складываются в «число повреждённых стикеров». Различаем `No issues found` и `Storage check unavailable`. Кнопка `Run check` (этап 5) действительно сравнивает базу с диском (`POST /api/storage/check`) и показывает конкретные элементы по категориям: для стикеров — короткий ID, относительный путь и `Open sticker`; для unlinked/temp — только относительное имя и `Review manually`. Проверка обновляет лишь флаги health; ничего не удаляет, не перемещает и не чинит.
+- **Archives**: `Create archive snapshot` с доступным диалогом подтверждения (не `window.confirm`). Список архивов (этап 5) — дата, ID, число стикеров и файлов, размер, целостность (`Not checked`, `Verified`, `Mismatch`, `Could not verify`) и `Verify files`. Проверка пересчитывает SHA-256 каждого файла из manifest и сообщает missing/changed/unexpected; архив при этом не изменяется. Результат хранится до перезапуска сервера. Никакого `Restore`.
 - **Output & Telegram**: серверные пути `statics`/`animated`/`archives` с `Copy path` и короткая инструкция: загрузка вручную через официальный @Stickers.
 
 ### Editor
 
-Без изменений относительно первой редакции (реализация — этап 5): desktop — превью/кадры слева, настройки справа; mobile — превью → `Animation slice` → `Transform` → `Outline` → `Text`. Scale 0.5–2.0, rotation −180…180°, outline 1–20 px + color, top/bottom text до 100 символов. Для анимации выбирается только начало, окно ≤ 3 s. `Original` / `Telegram` переключение без потери формы; `Discard changes?` при уходе с несохранёнными правками. До этапа 5 текущий модальный редактор только перекрашивается в светлую систему без изменения поведения.
+Отдельный вид (этап 5). Desktop — превью, кадры и окно анимации слева, настройки справа; уже 900 px — одна колонка: превью → `Animation slice` → `Transform` → `Outline` → `Text` (последние две сворачиваются). Scale 0.5–2.0×, rotation −180…180°, outline 1–20 px + color, top/bottom text до 100 символов; у каждого поля ползунок и числовое поле с единицей измерения.
+
+- Для анимации выбирается только начало; окно ≤ 3 s, конец вычисляется, короткий источник получает окно короче. Подсказки `Selected: 1.0–4.0 s (3.0 s)` и `Source: 4.8 s`. Лента из 8 кадров окна выбирает кадр превью. Превью анимации честно подписано как один кадр с приблизительными эффектами — итоговый WebM рендерит сервер. Для статики таймлайна нет, сохранённый WebP рендерится ровно из превью.
+- `Original` / `Telegram` переключает превью без потери формы; экспорт статики всегда идёт с эффектами.
+- `Undo` (и Ctrl+Z) отменяет по жестам — один сдвиг ползунка это один шаг; `Reset` возвращает исходные параметры и сам отменяется через Undo.
+- `Save & convert` блокируется только во время запроса (`Saving…`); ошибка показывается над редактором понятным текстом, параметры сохраняются. Успех возвращает в библиотеку с открытым инспектором.
+- При несохранённых правках `Library` / `Cancel` / Escape открывают `Discard changes?` с `Keep editing` и `Discard`; закрытие или перезагрузка вкладки вызывает `beforeunload`. Кнопка «назад» браузера этим диалогом не перехватывается.
+- При `missing_original` редактор не открывается, а объясняет почему.
 
 ### Packs (этап 7)
 
@@ -153,7 +160,7 @@ WebP поддерживается; никакое сообщение «WebP is n
 | Original отсутствует | `Original missing` в инспекторе | Edit/convert выключены; существующий output доступен |
 | Ошибка сохранения тегов | Введённые теги остаются в форме, сообщение рядом | Исправить и повторить |
 | Создание архива не удалось | `Archive could not be created` + причина | Повторить |
-| Storage summary недоступна | `Storage check unavailable`, а не `0 issues` | `Refresh summary` |
+| Storage summary недоступна | `Storage check unavailable`, а не `0 issues` | `Run check` |
 | DevTools не включён | `Manual import` в кнопке состояния | Подробности в popover, без ложного `Listening` |
 
 Сообщения об ошибках — рядом с соответствующей формой/действием; transient success — через `role=status`, error — через `role=alert`, без озвучивания каждого WebSocket-события. Toast не является единственным местом важной причины сбоя. Недоступные действия не скрываются молча: объяснение остаётся текстом.
@@ -164,14 +171,14 @@ WebP поддерживается; никакое сообщение «WebP is n
 | --- | --- | --- |
 | Каталог, статусы, теги, media | `GET /api/stickers`, WebSocket `init/new_sticker/sticker_update`, `POST /api/stickers/:id/tags` | **Этап 3:** вычисляемое поле `outputSizeBytes` — размер файла результата, измеренный `fs.stat` при отдаче записи; в базу не пишется, `null` при отсутствии файла |
 | Telegram check | `conversion`, `convertedRange`, `durationMs`, `width`/`height` записи | Размеры результата для наследных записей — только отдельной read-only проверкой, не догадкой |
-| Статус сервиса и Storage summary | `GET /api/status`, `GET /api/session` | Достоверный сигнал DevTools listening; детальная проверка файлов (этап 5) |
+| Статус сервиса и Storage summary | `GET /api/status`, `GET /api/session` | Достоверный сигнал DevTools listening. **Этап 5:** `POST /api/storage/check` — проверка с элементами по категориям |
 | Импорт | `POST /api/import/files` с `imported`, `duplicates`, `failed`, `results` | — |
 | Задачи | **Этап 4:** `GET /api/jobs`, `POST /api/jobs/convert` (`ids`, опционально `startTimes`), `POST /api/jobs/tags` (`ids`, `add`, `remove`), `POST /api/jobs/:id/cancel`; WebSocket `job_update` и `jobs` в `init` | Постоянная история задач — только если понадобится; сейчас память процесса, до 20 задач |
 | Редактор и output | `/api/stickers/:id/frame/:frameIndex`, `/api/convert`, edit routes | Undo/history при необходимости |
-| Архив | `POST /api/library/archive` | `GET /api/library/archives` и read-only verify (этап 5) |
+| Архив | `POST /api/library/archive`; **этап 5:** `GET /api/library/archives`, `POST /api/library/archives/:id/verify` | Restore — только отдельным backup-first сценарием |
 | Паки | Отсутствуют | Отдельное атомарное хранилище метаданных паков и export endpoint (этап 7) |
 
-Будущие endpoint-ы этапа 5: `GET /api/storage/issues`, `GET /api/library/archives`, `POST /api/library/archives/:id/verify` — все read-only, наследуют session/origin защиту и не принимают произвольный путь из UI.
+Endpoint-ы этапа 5 наследуют session/origin защиту и не принимают произвольный путь из UI: ID архива проверяется по шаблону и не может выйти за папку архивов, пути в ответах относительные. Проверка хранилища меняет только флаги health; восстановление прерванных конвертаций (`converting` → `failed`) выполняется лишь при старте сервера, поэтому проверка во время работающей задачи её не ломает.
 
 ## 7. Правила реализации и проверки
 

@@ -1,266 +1,150 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
 import { apiFetch } from '../lib/api';
 import { getOriginalPath, getPersistedRange } from '../lib/stickerModel';
+import { DEFAULT_PARAMS, getAnimationWindow } from '../lib/editorModel';
+import { canUndo, createEditorHistory, editorHistoryReducer, isDirty } from '../lib/editorHistory';
+import { CANVAS_SIZE, renderSticker } from '../lib/editorRender';
 
-export function useStickerEditor({ setStickers, selectedStartTimes, showToast }) {
-  // ----------------------------------------------------
-  // Canvas Editor Modal States
-  // ----------------------------------------------------
-  const [editingSticker, setEditingSticker] = useState(null);
-  const [editorScale, setEditorScale] = useState(1.0);
-  const [editorRotation, setEditorRotation] = useState(0);
-  const [editorTopText, setEditorTopText] = useState('');
-  const [editorBottomText, setEditorBottomText] = useState('');
-  const [editorStrokeActive, setEditorStrokeActive] = useState(false);
-  const [editorStrokeWidth, setEditorStrokeWidth] = useState(6);
-  const [editorStrokeColor, setEditorStrokeColor] = useState('#ffffff');
-  const [editorActiveFrame, setEditorActiveFrame] = useState(0);
-  const [editorSaving, setEditorSaving] = useState(false);
+const readJson = async (response) => {
+  try {
+    return await response.json();
+  } catch {
+    return {};
+  }
+};
 
+const loadImage = (src) => new Promise((resolve, reject) => {
+  const image = new Image();
+  image.decoding = 'async';
+  image.onload = () => resolve(image);
+  image.onerror = () => reject(new Error('Preview image could not be loaded'));
+  image.src = src;
+});
+
+/**
+ * Editor state for one sticker: parameters with undo history, the animation
+ * window, the preview frame and saving. Nothing reaches the server until save.
+ */
+export function useStickerEditor({ sticker, initialStart, setStickers, setSelectedStartTimes, showToast }) {
+  const [history, dispatch] = useReducer(editorHistoryReducer, null, () => createEditorHistory({
+    params: DEFAULT_PARAMS,
+    start: sticker?.isAnimated ? getAnimationWindow(sticker, initialStart ?? getPersistedRange(sticker).start).start : 0
+  }));
+  const state = history.current;
+  const [previewFrame, setPreviewFrame] = useState(null);
+  const [mode, setMode] = useState('telegram');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [previewError, setPreviewError] = useState('');
   const canvasRef = useRef(null);
-  const modalRef = useRef(null);
-  const modalCloseRef = useRef(null);
-  const editorTriggerRef = useRef(null);
+  const imageCacheRef = useRef(new Map());
 
-  // ----------------------------------------------------
-  // Canvas Rendering Pipeline (HTML5 Compositor)
-  // ----------------------------------------------------
-  useEffect(() => {
-    if (!editingSticker) return;
+  const animationWindow = sticker?.isAnimated ? getAnimationWindow(sticker, state.start) : null;
+  const frameIndex = animationWindow
+    ? Math.min(Math.max(previewFrame ?? animationWindow.startFrame, animationWindow.startFrame), animationWindow.endFrame)
+    : 0;
+  const imageSrc = !sticker
+    ? null
+    : sticker.isAnimated ? `/api/stickers/${sticker.id}/frame/${frameIndex}` : getOriginalPath(sticker);
+  const dirty = isDirty(history);
 
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-
-    // Source depending on static WebP vs scrubbing animated frame
-    if (editingSticker.isAnimated) {
-      img.src = `/api/stickers/${editingSticker.id}/frame/${editorActiveFrame}`;
-    } else {
-      img.src = getOriginalPath(editingSticker);
+  const getImage = (src) => {
+    const cache = imageCacheRef.current;
+    if (!cache.has(src)) {
+      const pending = loadImage(src);
+      pending.catch(() => cache.delete(src));
+      cache.set(src, pending);
     }
-
-    img.onload = () => {
-      // 1. Reset canvas
-      ctx.clearRect(0, 0, 512, 512);
-      ctx.save();
-
-      // 2. Perform transformations
-      ctx.translate(256, 256);
-      ctx.rotate((editorRotation * Math.PI) / 180);
-      ctx.scale(editorScale, editorScale);
-
-      // Fit sticker perfectly inside 512x512 with a boundary cushion for outlines & texts
-      const w = editingSticker.width;
-      const h = editingSticker.height;
-      let targetW, targetH;
-      if (w >= h) {
-        targetW = 380;
-        targetH = Math.round((h * 380) / w);
-      } else {
-        targetH = 380;
-        targetW = Math.round((w * 380) / h);
-      }
-
-      const drawX = -targetW / 2;
-      const drawY = -targetH / 2;
-
-      // 3. Draw outline border using offscreen double-buffering
-      if (editorStrokeActive && editorStrokeWidth > 0) {
-        const offscreen = document.createElement('canvas');
-        offscreen.width = 512;
-        offscreen.height = 512;
-        const oCtx = offscreen.getContext('2d');
-
-        // Draw transformed frame onto offscreen buffer
-        oCtx.save();
-        oCtx.translate(256, 256);
-        oCtx.rotate((editorRotation * Math.PI) / 180);
-        oCtx.scale(editorScale, editorScale);
-        oCtx.drawImage(img, drawX, drawY, targetW, targetH);
-        oCtx.restore();
-
-        // source-in composite color tinting
-        oCtx.globalCompositeOperation = 'source-in';
-        oCtx.fillStyle = editorStrokeColor;
-        oCtx.fillRect(0, 0, 512, 512);
-
-        // Stamp shifted silhouttes radially on main canvas
-        const step = 0.25;
-        for (let angle = 0; angle < Math.PI * 2; angle += step) {
-          const dx = Math.cos(angle) * editorStrokeWidth;
-          const dy = Math.sin(angle) * editorStrokeWidth;
-          ctx.drawImage(offscreen, dx, dy);
-        }
-      }
-
-      // 4. Paint primary transparent sticker exactly centered on top of borders
-      ctx.drawImage(img, drawX, drawY, targetW, targetH);
-      ctx.restore();
-
-      // 5. Draw meme texts (Impact font, black border outline)
-      ctx.font = 'bold 36px Impact, Arial Black, sans-serif';
-      ctx.fillStyle = '#ffffff';
-      ctx.strokeStyle = '#000000';
-      ctx.lineWidth = 5;
-      ctx.textAlign = 'center';
-
-      if (editorTopText) {
-        ctx.strokeText(editorTopText.toUpperCase(), 256, 60);
-        ctx.fillText(editorTopText.toUpperCase(), 256, 60);
-      }
-
-      if (editorBottomText) {
-        ctx.strokeText(editorBottomText.toUpperCase(), 256, 460);
-        ctx.fillText(editorBottomText.toUpperCase(), 256, 460);
-      }
-    };
-
-    img.onerror = () => {
-      ctx.clearRect(0, 0, 512, 512);
-      ctx.fillStyle = 'var(--text-muted)';
-      ctx.font = '14px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('Failed to load frame preview buffer', 256, 256);
-    };
-  }, [
-    editingSticker,
-    editorScale,
-    editorRotation,
-    editorTopText,
-    editorBottomText,
-    editorStrokeActive,
-    editorStrokeWidth,
-    editorStrokeColor,
-    editorActiveFrame
-  ]);
-
-  useEffect(() => {
-    if (!editingSticker) return undefined;
-
-    const previousOverflow = document.body.style.overflow;
-    const previouslyFocused = document.activeElement;
-    document.body.style.overflow = 'hidden';
-    const focusFrame = window.requestAnimationFrame(() => modalCloseRef.current?.focus());
-
-    const handleModalKeyDown = (event) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        setEditingSticker(null);
-        return;
-      }
-
-      if (event.key !== 'Tab' || !modalRef.current) return;
-      const focusable = Array.from(modalRef.current.querySelectorAll(
-        'button:not([disabled]), input:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
-      )).filter((element) => !element.hasAttribute('hidden'));
-      if (!focusable.length) return;
-
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-
-    document.addEventListener('keydown', handleModalKeyDown);
-    return () => {
-      window.cancelAnimationFrame(focusFrame);
-      document.removeEventListener('keydown', handleModalKeyDown);
-      document.body.style.overflow = previousOverflow;
-      const focusTarget = editorTriggerRef.current || previouslyFocused;
-      window.setTimeout(() => focusTarget?.focus(), 0);
-    };
-  }, [editingSticker]);
-
-  const openEditor = (sticker, trigger) => {
-    editorTriggerRef.current = trigger;
-    setEditorScale(1.0);
-    setEditorRotation(0);
-    setEditorTopText('');
-    setEditorBottomText('');
-    setEditorStrokeActive(false);
-    setEditorStrokeWidth(6);
-    setEditorStrokeColor('#ffffff');
-    setEditorActiveFrame(0);
-    setEditingSticker(sticker);
+    return cache.get(src);
   };
 
-  // Compile Customized Canvas Edits
-  const handleSaveEdit = async () => {
-    if (!editingSticker) return;
-    setEditorSaving(true);
+  // Redraw whenever the image, parameters or preview mode change. The previous
+  // drawing stays until the next image is ready, so the preview does not flash.
+  useEffect(() => {
+    if (!imageSrc) return undefined;
+    let cancelled = false;
+    getImage(imageSrc).then((image) => {
+      if (cancelled || !canvasRef.current) return;
+      renderSticker(canvasRef.current.getContext('2d'), image, state.params, mode);
+      setPreviewError('');
+    }).catch((error) => {
+      if (!cancelled) setPreviewError(error.message);
+    });
+    return () => { cancelled = true; };
+  }, [imageSrc, state.params, mode]);
 
+  // Warn before closing or reloading the tab with unsaved changes.
+  useEffect(() => {
+    if (!dirty) return undefined;
+    const onBeforeUnload = (event) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [dirty]);
+
+  /** Live update; call checkpoint() when a gesture ends to make it undoable. */
+  const update = (patch) => {
+    dispatch({ type: 'update', patch });
+    if (patch.start !== undefined) setPreviewFrame(null);
+  };
+  const checkpoint = () => dispatch({ type: 'checkpoint' });
+  const undo = () => {
+    dispatch({ type: 'undo' });
+    setPreviewFrame(null);
+  };
+  const reset = () => {
+    dispatch({ type: 'reset' });
+    setPreviewFrame(null);
+  };
+
+  const save = async () => {
+    if (!sticker) return false;
+    setSaving(true);
+    setSaveError('');
     try {
-      if (editingSticker.isAnimated) {
-        // Post transforms model to backend for frame-by-frame renders
-        const startTime = selectedStartTimes[editingSticker.id] ?? getPersistedRange(editingSticker).start;
-        const response = await apiFetch(`/api/edit-convert-animated`, {
+      let response;
+      if (sticker.isAnimated) {
+        response = await apiFetch('/api/edit-convert-animated', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            id: editingSticker.id,
-            startTime,
-            transforms: {
-              scale: editorScale,
-              rotation: editorRotation,
-              strokeActive: editorStrokeActive,
-              strokeWidth: editorStrokeWidth,
-              strokeColor: editorStrokeColor,
-              topText: editorTopText,
-              bottomText: editorBottomText,
-              textColor: '#ffffff',
-              textSize: 36
-            }
+            id: sticker.id,
+            startTime: state.start,
+            transforms: { ...state.params, textColor: '#ffffff', textSize: 36 }
           })
         });
-
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || 'Animated edit compile failed.');
-
-        setStickers(prev => prev.map(s => s.id === editingSticker.id ? { ...s, ...result.sticker } : s));
-        showToast('Edited sticker saved and converted (WebM).');
       } else {
-        // Upload base64 PNG data for high-speed static WebP conversion
-        const canvas = canvasRef.current;
-        const dataUrl = canvas.toDataURL('image/png');
-
-        const response = await apiFetch(`/api/edit-convert-static`, {
+        // The export is always rendered with effects, whichever preview is shown.
+        const image = await getImage(getOriginalPath(sticker));
+        const exportCanvas = document.createElement('canvas');
+        exportCanvas.width = CANVAS_SIZE;
+        exportCanvas.height = CANVAS_SIZE;
+        renderSticker(exportCanvas.getContext('2d'), image, state.params, 'telegram');
+        response = await apiFetch('/api/edit-convert-static', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            id: editingSticker.id,
-            pngBase64: dataUrl
-          })
+          body: JSON.stringify({ id: sticker.id, pngBase64: exportCanvas.toDataURL('image/png') })
         });
-
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || 'Static edit compile failed.');
-
-        setStickers(prev => prev.map(s => s.id === editingSticker.id ? { ...s, ...result.sticker } : s));
-        showToast('Edited sticker saved and converted (WebP).');
       }
-
-      setEditingSticker(null);
-    } catch (err) {
-      showToast(`Editing failed: ${err.message}`, 'error');
+      const result = await readJson(response);
+      if (!response.ok) throw new Error(result.error || 'The edited sticker could not be saved');
+      setStickers((previous) => previous.map((item) => (item.id === sticker.id ? { ...item, ...result.sticker } : item)));
+      if (sticker.isAnimated) setSelectedStartTimes((previous) => ({ ...previous, [sticker.id]: state.start }));
+      showToast(`Edited sticker saved and converted (${sticker.isAnimated ? 'WebM' : 'WebP'}).`);
+      return true;
+    } catch (error) {
+      setSaveError(error.message);
+      return false;
     } finally {
-      setEditorSaving(false);
+      setSaving(false);
     }
   };
 
   return {
-    editingSticker, setEditingSticker, modalRef, modalCloseRef, canvasRef,
-    editorActiveFrame, setEditorActiveFrame, editorScale, setEditorScale,
-    editorRotation, setEditorRotation, editorStrokeActive, setEditorStrokeActive,
-    editorStrokeWidth, setEditorStrokeWidth, editorStrokeColor, setEditorStrokeColor,
-    editorTopText, setEditorTopText, editorBottomText, setEditorBottomText,
-    editorSaving, handleSaveEdit, openEditor
+    canvasRef, params: state.params, start: state.start, animationWindow, frameIndex, setPreviewFrame,
+    mode, setMode, update, checkpoint, undo, reset, canUndo: canUndo(history),
+    dirty, save, saving, saveError, previewError
   };
 }

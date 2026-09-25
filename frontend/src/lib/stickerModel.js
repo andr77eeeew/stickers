@@ -350,7 +350,7 @@ export const VIEW_DEFAULTS = {
 };
 
 const ALLOWED = {
-  view: ['library', 'health'],
+  view: ['library', 'health', 'editor'],
   type: ['all', 'static', 'animated'],
   status: ['all', 'ready', 'action', 'converting'],
   sort: ['newest', 'oldest', 'largest']
@@ -362,7 +362,7 @@ export const parseViewState = (search) => {
   const page = Number.parseInt(params.get('page') || '', 10);
   const id = params.get('id');
   return {
-    view: pick('view'),
+    view: pick('view') === 'editor' && !(id && /^[a-f0-9]{8,64}$/i.test(id)) ? VIEW_DEFAULTS.view : pick('view'),
     q: (params.get('q') || '').slice(0, 200),
     type: pick('type'),
     status: pick('status'),

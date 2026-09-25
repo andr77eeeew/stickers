@@ -36,7 +36,11 @@ const {
   reconcileStorage,
   resolveUnder
 } = require('./lib/stickerDatabase');
-const { createLibraryArchiveSnapshot } = require('./lib/libraryArchive');
+const {
+  createLibraryArchiveSnapshot,
+  listLibraryArchives,
+  verifyLibraryArchive
+} = require('./lib/libraryArchive');
 const { createLocalSecurity, isExtensionOrigin } = require('./lib/localSecurity');
 const {
   HOST,
@@ -175,7 +179,9 @@ const loadedDatabase = database.load();
 capturedStickers = loadedDatabase.stickers;
 const initialReconciliation = reconcileStorage(capturedStickers, {
   outputDir: OUTPUT_DIR,
-  tempDir: TEMP_DIR
+  tempDir: TEMP_DIR,
+  // Only at startup can a 'converting' record be known to be interrupted.
+  recoverInterrupted: true
 });
 storageHealth = {
   ...initialReconciliation.report,
@@ -187,17 +193,18 @@ function saveDatabase() {
   database.save(capturedStickers);
 }
 
-function refreshStorageHealth() {
+function refreshStorageHealth({ collectItems = false } = {}) {
   const reconciliation = reconcileStorage(capturedStickers, {
     outputDir: OUTPUT_DIR,
-    tempDir: TEMP_DIR
+    tempDir: TEMP_DIR,
+    collectItems
   });
   storageHealth = {
     ...reconciliation.report,
     recoveredFromBackup: Boolean(storageHealth && storageHealth.recoveredFromBackup)
   };
   if (reconciliation.changed) saveDatabase();
-  return storageHealth;
+  return collectItems ? { storage: storageHealth, issues: reconciliation.issues } : storageHealth;
 }
 
 // Measured on every read so the UI never trusts a stale or legacy size field.
@@ -786,6 +793,51 @@ app.post('/api/library/archive', (_req, res) => {
     return res.status(500).json({
       error: `Archive snapshot failed; the active library was left untouched: ${error.message}`
     });
+  }
+});
+
+// Read-only archive history. Verification results live for the server process only.
+const archiveVerifications = new Map();
+let archiveVerificationRunning = false;
+
+app.get('/api/library/archives', (_req, res) => {
+  try {
+    const archives = listLibraryArchives({ archivesDir: ARCHIVES_DIR }).map((archive) => ({
+      ...archive,
+      lastVerification: archiveVerifications.get(archive.id) || null
+    }));
+    return res.json({ archives, verificationScope: 'server-process' });
+  } catch (error) {
+    return res.status(500).json({ error: `Archive list could not be read: ${error.message}` });
+  }
+});
+
+app.post('/api/library/archives/:id/verify', async (req, res) => {
+  if (archiveVerificationRunning) {
+    return res.status(409).json({ error: 'Another archive is being verified. Try again when it finishes.' });
+  }
+  archiveVerificationRunning = true;
+  try {
+    const result = await verifyLibraryArchive({ archivesDir: ARCHIVES_DIR, id: String(req.params.id) });
+    archiveVerifications.set(result.id, result);
+    return res.json({ verification: result });
+  } catch (error) {
+    if (error.code === 'ARCHIVE_NOT_FOUND') return res.status(404).json({ error: 'Archive not found.' });
+    return res.status(500).json({ error: `Archive could not be verified: ${error.message}` });
+  } finally {
+    archiveVerificationRunning = false;
+  }
+});
+
+// Runs the storage comparison now and returns item-level issues. It may update
+// health flags but never deletes, moves or repairs files.
+app.post('/api/storage/check', (_req, res) => {
+  try {
+    const result = refreshStorageHealth({ collectItems: true });
+    emitStatus();
+    return res.json(result);
+  } catch (error) {
+    return res.status(500).json({ error: `Storage check failed: ${error.message}` });
   }
 });
 

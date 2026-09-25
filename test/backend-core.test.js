@@ -257,13 +257,30 @@ test('reconciliation reports damage without deleting files and makes stale jobs 
       status: 'converting',
       convertedPath: '/animated/2026-08-18/missing.webm'
     }];
-    const reconciled = reconcileStorage(stickers, { outputDir, tempDir });
+    // A routine check while a conversion runs must not touch its status.
+    const running = [{ ...stickers[0] }];
+    const routine = reconcileStorage(running, { outputDir, tempDir });
+    assert.equal(running[0].status, 'converting');
+    assert.equal(routine.report.staleConversions, 0);
+
+    const reconciled = reconcileStorage(stickers, { outputDir, tempDir, recoverInterrupted: true, collectItems: true });
 
     assert.equal(reconciled.report.staleConversions, 1);
     assert.equal(reconciled.report.missingConverted, 1);
     assert.equal(reconciled.report.orphanFiles, 1);
     assert.equal(stickers[0].status, 'failed');
     assert.equal(fs.existsSync(path.join(capturedDir, 'orphan.webp')), true);
+    assert.deepEqual(reconciled.issues.orphanFiles.items, [{ name: 'captured/2026-08-18/orphan.webp' }]);
+    assert.deepEqual(reconciled.issues.missingConverted.items, [
+      { stickerId: 'c'.repeat(64), name: 'animated/2026-08-18/missing.webm' }
+    ]);
+    const serialized = JSON.stringify(reconciled.issues);
+    assert.ok(!serialized.includes(root), 'issue names never contain absolute paths');
+
+    // The interrupted flag survives later routine checks until the sticker is converted again.
+    const later = reconcileStorage(stickers, { outputDir, tempDir });
+    assert.equal(later.report.staleConversions, 1);
+    assert.ok(stickers[0].health.includes('interrupted_conversion'));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

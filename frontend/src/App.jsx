@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CircleCheck, CircleAlert } from 'lucide-react';
 import { useStickerSession } from './hooks/useStickerSession';
-import { useStickerEditor } from './hooks/useStickerEditor';
 import { useStickerActions } from './hooks/useStickerActions';
 import { useManualImport } from './hooks/useManualImport';
 import { useViewState } from './hooks/useViewState';
@@ -11,7 +10,7 @@ import { LibraryView } from './components/LibraryView';
 import { StickerInspector } from './components/StickerInspector';
 import { ImportPanel } from './components/ImportPanel';
 import { HealthView } from './components/HealthView';
-import { EditorModal } from './components/EditorModal';
+import { EditorView } from './components/EditorView';
 import { JobCenter } from './components/JobCenter';
 import { SelectionBar } from './components/SelectionBar';
 import { BatchTagsDialog } from './components/BatchTagsDialog';
@@ -30,7 +29,7 @@ export default function App() {
   const session = useStickerSession();
   const {
     stickers, setStickers, bootstrapState, bootstrapError, captureStatus, setCaptureStatus,
-    sessionInfo, setSessionInfo, outputPaths, socketConnected, retryConnection, refreshStatus,
+    sessionInfo, setSessionInfo, outputPaths, socketConnected, retryConnection,
     jobs, setJobs, jobHistory
   } = session;
   const { viewState, updateView, openSticker, closeSticker } = useViewState();
@@ -58,7 +57,6 @@ export default function App() {
   }, []);
   useEffect(() => () => window.clearTimeout(toastTimerRef.current), []);
 
-  const editor = useStickerEditor({ setStickers, selectedStartTimes, showToast });
   const actions = useStickerActions({
     stickers, setStickers, selectedStartTimes, showToast,
     captureStatus, setCaptureStatus, setSessionInfo, outputPaths, setJobs
@@ -142,7 +140,7 @@ export default function App() {
     if (!selectionMode) return undefined;
     const onKeyDown = (event) => {
       if (event.key !== 'Escape' || event.defaultPrevented) return;
-      if (document.querySelector('dialog[open], .editor-modal-backdrop, .inspector')) return;
+      if (document.querySelector('dialog[open], .inspector')) return;
       setSelectionMode(false);
       setSelectedIds(new Set());
     };
@@ -180,7 +178,7 @@ export default function App() {
       if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey) return;
       const target = event.target;
       if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
-      if (document.querySelector('dialog[open], .editor-modal-backdrop')) return;
+      if (document.querySelector('dialog[open]') || viewState.view === 'editor') return;
       event.preventDefault();
       if (viewState.view !== 'library') updateView({ view: 'library' }, { push: true });
       window.setTimeout(() => searchRef.current?.focus(), 0);
@@ -222,6 +220,15 @@ export default function App() {
     };
   }, [handleManualFiles]);
 
+  // The editor is a pushed history entry, so leaving it steps back to the
+  // library exactly as it was (filters, page and open inspector).
+  const openEditorView = (id) => updateView({ view: 'editor', id }, { push: true, marker: 'editor' });
+  const exitEditor = useCallback(() => {
+    if (window.history.state === 'editor') window.history.back();
+    else updateView({ view: 'library' });
+  }, [updateView]);
+  const stickerIds = useMemo(() => new Set(stickers.map((sticker) => sticker.id)), [stickers]);
+
   const navigate = (view) => updateView({ view, id: null }, { push: true });
   const showNeedsAction = () => updateView({ view: 'library', status: 'action', type: 'all', q: '', page: 1, id: null }, { push: true });
 
@@ -240,13 +247,27 @@ export default function App() {
         }}
       />
 
-      {viewState.view === 'health' ? (
+      {viewState.view === 'editor' ? (
+        <main id="main-content" className="workspace" tabIndex={-1}>
+          <EditorView
+            sticker={selectedSticker}
+            loading={bootstrapState !== 'ready' || !stickers.length}
+            onExit={exitEditor}
+            setStickers={setStickers}
+            selectedStartTimes={selectedStartTimes}
+            setSelectedStartTimes={setSelectedStartTimes}
+            showToast={showToast}
+          />
+        </main>
+      ) : viewState.view === 'health' ? (
         <main id="main-content" className="workspace" tabIndex={-1}>
           <HealthView
             storage={captureStatus.storage}
+            setCaptureStatus={setCaptureStatus}
             outputPath={actions.outputPath}
             copyText={actions.copyText}
-            refreshStatus={refreshStatus}
+            stickerIds={stickerIds}
+            onOpenSticker={(id) => updateView({ view: 'library', id }, { push: true })}
             onShowNeedsAction={showNeedsAction}
             handleArchiveLibrary={actions.handleArchiveLibrary}
             archiving={actions.archiving}
@@ -302,7 +323,7 @@ export default function App() {
               loading={bootstrapState !== 'ready' || !stickers.length}
               onClose={handleCloseInspector}
               handleConvert={actions.handleConvert}
-              openEditor={editor.openEditor}
+              openEditor={(sticker) => openEditorView(sticker.id)}
               triggerBrowserDownload={actions.triggerBrowserDownload}
               handleSaveTags={actions.handleSaveTags}
               selectedStartTimes={selectedStartTimes}
@@ -357,7 +378,6 @@ export default function App() {
         onSubmit={(add, remove) => actions.startTagJob([...selectedIds], add, remove)}
       />
 
-      <EditorModal {...editor} />
 
       {dragActive && !importOpen && (
         <div className="drop-overlay" aria-hidden="true">
