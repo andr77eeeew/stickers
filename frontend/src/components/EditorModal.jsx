@@ -1,5 +1,6 @@
-import { Sliders, Type, RotateCw, RefreshCw } from 'lucide-react';
+import { X, LoaderCircle } from 'lucide-react';
 
+// Behaviour is unchanged from stage 2; the full editor redesign is stage 5.
 export function EditorModal({
   editingSticker, setEditingSticker, modalRef, modalCloseRef, canvasRef,
   editorActiveFrame, setEditorActiveFrame, editorScale, setEditorScale,
@@ -8,225 +9,120 @@ export function EditorModal({
   editorTopText, setEditorTopText, editorBottomText, setEditorBottomText,
   editorSaving, handleSaveEdit
 }) {
+  if (!editingSticker) return null;
+
   return (
-    <>
-      {/* ----------------------------------------------------
-          Creative HTML5 Canvas Editor Modal overlay
-          ---------------------------------------------------- */}
-      {editingSticker && (
-        <div className="editor-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setEditingSticker(null); }}>
-          <div
-            ref={modalRef}
-            className="editor-modal-container glass-panel"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="editor-modal-title"
+    <div className="editor-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setEditingSticker(null); }}>
+      <div
+        ref={modalRef}
+        className="editor-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="editor-modal-title"
+      >
+        <div className="editor-modal-header">
+          <div>
+            <h2 id="editor-modal-title">Edit sticker</h2>
+            <p className="muted small mono">{String(editingSticker.id).slice(0, 8)}</p>
+          </div>
+          <button
+            ref={modalCloseRef}
+            type="button"
+            onClick={() => setEditingSticker(null)}
+            className="icon-btn"
+            aria-label="Close sticker editor"
           >
-            <div className="editor-modal-content">
+            <X size={18} aria-hidden="true" />
+          </button>
+        </div>
 
-              {/* Left Pane - Drawing Canvas & Frame controls */}
-              <div className="editor-left">
-                <h3 className="companion-title" style={{ fontSize: '1.15rem' }}>🎯 CREATOR CANVAS</h3>
+        <div className="editor-modal-body">
+          <div className="editor-preview">
+            <div className="editor-canvas-frame">
+              <canvas
+                ref={canvasRef}
+                width={512}
+                height={512}
+                className="editor-canvas"
+                role="img"
+                aria-label="Preview of the customized sticker"
+              />
+            </div>
 
-                <div className="canvas-wrapper">
-                  <canvas
-                    ref={canvasRef}
-                    width={512}
-                    height={512}
-                    className="canvas-preview"
-                    role="img"
-                    aria-label="Preview of the customized sticker"
-                  />
-                </div>
-
-                {editingSticker.isAnimated && (
-                  <div className="editor-control-group" style={{ width: '100%' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                      <span>Scrub Preview Frames:</span>
-                      <span style={{ fontFamily: 'monospace', color: 'var(--accent-cyan)' }}>{editorActiveFrame} / {editingSticker.frames - 1}</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={editingSticker.frames - 1}
-                      step={1}
-                      value={editorActiveFrame}
-                      onChange={(e) => setEditorActiveFrame(parseInt(e.target.value))}
-                      className="custom-range-slider"
-                      style={{ background: 'rgba(6, 182, 212, 0.15)' }}
-                      aria-label="Preview animation frame"
-                    />
-                  </div>
-                )}
-
-                <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
-                  Visual Preview - Transparent Alpha Composited
+            {editingSticker.isAnimated && (
+              <label className="editor-field">
+                <span className="editor-field-row">
+                  <span>Preview frame</span>
+                  <span className="tabular">{editorActiveFrame} / {editingSticker.frames - 1}</span>
                 </span>
-              </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={editingSticker.frames - 1}
+                  step={1}
+                  value={editorActiveFrame}
+                  onChange={(event) => setEditorActiveFrame(parseInt(event.target.value, 10))}
+                />
+              </label>
+            )}
+            <p className="muted small">Preview composited on transparency. {editingSticker.isAnimated ? 'Shows one frame; the saved sticker uses the selected 3-second window.' : ''}</p>
+          </div>
 
-              {/* Right Pane - Creative Sliders & Options controls */}
-              <div className="editor-right">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <h3 id="editor-modal-title" style={{ fontSize: '1.2rem', background: 'var(--gradient-cyber)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
-                    Sticker Customizer
-                  </h3>
-                  <button
-                    ref={modalCloseRef}
-                    type="button"
-                    onClick={() => setEditingSticker(null)}
-                    className="editor-close-btn"
-                    aria-label="Close sticker editor"
-                  >
-                    &times;
-                  </button>
-                </div>
+          <div className="editor-controls">
+            <fieldset>
+              <legend>Transform</legend>
+              <label className="editor-field">
+                <span className="editor-field-row"><span>Scale</span><span className="tabular">{editorScale.toFixed(2)}×</span></span>
+                <input type="range" min={0.5} max={2.0} step={0.05} value={editorScale} onChange={(event) => setEditorScale(parseFloat(event.target.value))} />
+              </label>
+              <label className="editor-field">
+                <span className="editor-field-row"><span>Rotation</span><span className="tabular">{editorRotation}°</span></span>
+                <input type="range" min={-180} max={180} step={5} value={editorRotation} onChange={(event) => setEditorRotation(parseInt(event.target.value, 10))} />
+              </label>
+            </fieldset>
 
-                {/* Transformations */}
-                <div className="editor-control-group">
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <label className="editor-control-label"><Sliders size={12} style={{ display: 'inline', marginRight: '4px' }} /> Scale Layout</label>
-                    <span style={{ fontSize: '0.75rem', fontFamily: 'monospace', color: 'var(--accent-fuchsia)' }}>{editorScale.toFixed(2)}x</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0.5}
-                    max={2.0}
-                    step={0.05}
-                    value={editorScale}
-                    onChange={(e) => setEditorScale(parseFloat(e.target.value))}
-                    className="custom-range-slider"
-                    aria-label="Sticker scale"
-                  />
-                </div>
-
-                <div className="editor-control-group">
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <label className="editor-control-label"><RotateCw size={12} style={{ display: 'inline', marginRight: '4px' }} /> Rotation Angle</label>
-                    <span style={{ fontSize: '0.75rem', fontFamily: 'monospace', color: 'var(--accent-fuchsia)' }}>{editorRotation}°</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={-180}
-                    max={180}
-                    step={5}
-                    value={editorRotation}
-                    onChange={(e) => setEditorRotation(parseInt(e.target.value, 10))}
-                    className="custom-range-slider"
-                    aria-label="Sticker rotation in degrees"
-                  />
-                </div>
-
-                {/* Outline stroke border */}
-                <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '16px' }} />
-
-                <div className="editor-control-group">
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.85rem' }}>
-                    <input
-                      type="checkbox"
-                      checked={editorStrokeActive}
-                      onChange={(e) => setEditorStrokeActive(e.target.checked)}
-                      style={{ cursor: 'pointer', width: '16px', height: '16px', accentColor: 'var(--accent-fuchsia)' }}
-                    />
-                    <span className="editor-control-label" style={{ userSelect: 'none' }}>Active Transparent Stroke Outline</span>
+            <fieldset>
+              <legend>Outline</legend>
+              <label className="checkbox-row">
+                <input type="checkbox" checked={editorStrokeActive} onChange={(event) => setEditorStrokeActive(event.target.checked)} />
+                Add outline
+              </label>
+              {editorStrokeActive && (
+                <>
+                  <label className="editor-field">
+                    <span className="editor-field-row"><span>Width</span><span className="tabular">{editorStrokeWidth} px</span></span>
+                    <input type="range" min={1} max={20} step={1} value={editorStrokeWidth} onChange={(event) => setEditorStrokeWidth(parseInt(event.target.value, 10))} />
                   </label>
-                </div>
+                  <label className="editor-field editor-color">
+                    <span>Color</span>
+                    <input type="color" value={editorStrokeColor} onChange={(event) => setEditorStrokeColor(event.target.value)} />
+                    <span className="mono">{editorStrokeColor.toUpperCase()}</span>
+                  </label>
+                </>
+              )}
+            </fieldset>
 
-                {editorStrokeActive && (
-                  <>
-                    <div className="editor-control-group">
-                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                        <label className="editor-control-label">Stroke Width (Thickness)</label>
-                        <span style={{ fontSize: '0.75rem', fontFamily: 'monospace', color: 'var(--accent-cyan)' }}>{editorStrokeWidth}px</span>
-                      </div>
-                      <input
-                        type="range"
-                        min={1}
-                        max={20}
-                        step={1}
-                        value={editorStrokeWidth}
-                        onChange={(e) => setEditorStrokeWidth(parseInt(e.target.value, 10))}
-                        className="custom-range-slider"
-                        aria-label="Outline stroke width"
-                      />
-                    </div>
+            <fieldset>
+              <legend>Text</legend>
+              <label className="editor-field">
+                <span>Top text</span>
+                <input type="text" maxLength={100} value={editorTopText} onChange={(event) => setEditorTopText(event.target.value)} />
+              </label>
+              <label className="editor-field">
+                <span>Bottom text</span>
+                <input type="text" maxLength={100} value={editorBottomText} onChange={(event) => setEditorBottomText(event.target.value)} />
+              </label>
+            </fieldset>
 
-                    <div className="editor-control-group">
-                      <label className="editor-control-label">Stroke Border Color</label>
-                      <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                        <input
-                          type="color"
-                          value={editorStrokeColor}
-                          onChange={(e) => setEditorStrokeColor(e.target.value)}
-                          aria-label="Outline stroke color"
-                          style={{ border: 'none', width: '36px', height: '36px', cursor: 'pointer', background: 'transparent' }}
-                        />
-                        <span style={{ fontSize: '0.8rem', fontFamily: 'monospace' }}>{editorStrokeColor.toUpperCase()}</span>
-                      </div>
-                    </div>
-                  </>
-                )}
-
-                {/* Meme Texts */}
-                <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '16px' }} />
-
-                <div className="editor-control-group">
-                  <label className="editor-control-label"><Type size={12} style={{ display: 'inline', marginRight: '4px' }} /> Top Text Overlay</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. COMPILING CODE WITHOUT LINTS..."
-                    value={editorTopText}
-                    onChange={(e) => setEditorTopText(e.target.value)}
-                    className="editor-input"
-                    aria-label="Top text overlay"
-                  />
-                </div>
-
-                <div className="editor-control-group">
-                  <label className="editor-control-label"><Type size={12} style={{ display: 'inline', marginRight: '4px' }} /> Bottom Text Overlay</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. FIRST TRY!"
-                    value={editorBottomText}
-                    onChange={(e) => setEditorBottomText(e.target.value)}
-                    className="editor-input"
-                    aria-label="Bottom text overlay"
-                  />
-                </div>
-
-                {/* Saving / Apply Buttons */}
-                <div style={{ display: 'flex', gap: '12px', marginTop: 'auto', paddingTop: '20px' }}>
-                  <button
-                    type="button"
-                    onClick={() => setEditingSticker(null)}
-                    style={{ flex: 1, background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '12px', padding: '12px', color: 'white', cursor: 'pointer', fontWeight: 600 }}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleSaveEdit}
-                    disabled={editorSaving}
-                    className="download-btn success"
-                    style={{ flex: 1.5 }}
-                  >
-                    {editorSaving ? (
-                      <>
-                        <RefreshCw size={16} className="spinner" /> Compiling Custom...
-                      </>
-                    ) : (
-                      <>
-                        💎 Apply & Compile Sticker
-                      </>
-                    )}
-                  </button>
-                </div>
-
-              </div>
-
+            <div className="dialog-actions">
+              <button type="button" className="btn" onClick={() => setEditingSticker(null)}>Cancel</button>
+              <button type="button" className="btn btn-primary" onClick={handleSaveEdit} disabled={editorSaving}>
+                {editorSaving ? <><LoaderCircle size={16} className="spin" aria-hidden="true" /> Saving…</> : 'Save & convert'}
+              </button>
             </div>
           </div>
         </div>
-      )}
-    </>
+      </div>
+    </div>
   );
 }

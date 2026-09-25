@@ -1,193 +1,222 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { CircleCheck, CircleAlert } from 'lucide-react';
 import { useStickerSession } from './hooks/useStickerSession';
 import { useStickerEditor } from './hooks/useStickerEditor';
 import { useStickerActions } from './hooks/useStickerActions';
 import { useManualImport } from './hooks/useManualImport';
-import { StatusSection } from './components/StatusSection';
-import { LibraryStats } from './components/LibraryStats';
-import { ManualImportZone } from './components/ManualImportZone';
-import { StickerGroups } from './components/StickerGroups';
+import { useViewState } from './hooks/useViewState';
+import { usePreferences } from './hooks/usePreferences';
+import { AppHeader } from './components/AppHeader';
+import { LibraryView } from './components/LibraryView';
+import { StickerInspector } from './components/StickerInspector';
+import { ImportPanel } from './components/ImportPanel';
+import { HealthView } from './components/HealthView';
 import { EditorModal } from './components/EditorModal';
-import { PAGE_SIZE, selectLibrary } from './lib/stickerModel';
-import { CheckCircle, AlertTriangle, Archive, Info } from 'lucide-react';
+import {
+  PAGE_SIZE, PAGE_SIZE_DENSE, needsAction, selectCatalogue, summarizeAttention
+} from './lib/stickerModel';
+
+const hasFiles = (event) => Array.from(event.dataTransfer?.types || []).includes('Files');
 
 export default function App() {
+  const session = useStickerSession();
   const {
-    stickers, setStickers,
-    bootstrapState, bootstrapError,
-    captureStatus, setCaptureStatus,
-    sessionInfo, setSessionInfo,
-    outputPaths, socketConnected
-  } = useStickerSession();
-  const [activeTab, setActiveTab] = useState('all'); // 'all' | 'static' | 'animated'
-  const [searchQuery, setSearchQuery] = useState('');
-  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
-  const [toastMessage, setToastMessage] = useState(null);
-  // Custom slider state dictionary mapping sticker.id -> selectedStartTime (seconds)
+    stickers, setStickers, bootstrapState, bootstrapError, captureStatus, setCaptureStatus,
+    sessionInfo, setSessionInfo, outputPaths, socketConnected, retryConnection, refreshStatus
+  } = session;
+  const { viewState, updateView, openSticker, closeSticker } = useViewState();
+  const { preferences, setPreference } = usePreferences();
+  const [toast, setToast] = useState(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  // Selected 3-second window per animated sticker id (seconds).
   const [selectedStartTimes, setSelectedStartTimes] = useState({});
-  
   const toastTimerRef = useRef(null);
+  const searchRef = useRef(null);
+  const dragDepthRef = useRef(0);
 
-  const showToast = (message) => {
-    setToastMessage(message);
+  const showToast = useCallback((message, tone = 'ok') => {
+    setToast({ message, tone });
     window.clearTimeout(toastTimerRef.current);
-    toastTimerRef.current = window.setTimeout(() => setToastMessage(null), 4000);
-  };
-
+    toastTimerRef.current = window.setTimeout(() => setToast(null), tone === 'error' ? 7000 : 4000);
+  }, []);
   useEffect(() => () => window.clearTimeout(toastTimerRef.current), []);
 
   const editor = useStickerEditor({ setStickers, selectedStartTimes, showToast });
-  const { openEditor } = editor;
-  const {
-    editingTags, setEditingTags, archiving, folderCopySuccess,
-    handleConvert, handleSaveTags, triggerBrowserDownload,
-    handleArchiveLibrary, handleResetSession, copyFolderPath, outputPath
-  } = useStickerActions({
+  const actions = useStickerActions({
     stickers, setStickers, selectedStartTimes, showToast,
     captureStatus, setCaptureStatus, setSessionInfo, outputPaths
   });
-  const {
-    manualImporting, manualAutoConvert, setManualAutoConvert,
-    manualDragOver, setManualDragOver, fileInputRef, handleManualFiles
-  } = useManualImport({ bootstrapState, setStickers, showToast, handleConvert });
+  const importer = useManualImport({ bootstrapState, setStickers, showToast, handleConvert: actions.handleConvert });
+  const { handleManualFiles } = importer;
 
+  const pageSize = preferences.density === 'dense' ? PAGE_SIZE_DENSE : PAGE_SIZE;
+  const catalogue = useMemo(
+    () => selectCatalogue(stickers, { ...viewState, pageSize }),
+    [stickers, viewState, pageSize]
+  );
+  const attention = useMemo(() => summarizeAttention(stickers), [stickers]);
+  const attentionSamples = useMemo(() => stickers.filter(needsAction).slice(0, 5), [stickers]);
+  const selectedSticker = viewState.id ? stickers.find((sticker) => sticker.id === viewState.id) || null : null;
+  const inspectorOpen = viewState.view === 'library' && Boolean(viewState.id);
 
+  // Keep the URL page within range after filters or WebSocket updates shrink the list.
+  useEffect(() => {
+    if (stickers.length && catalogue.page !== viewState.page) updateView({ page: catalogue.page });
+  }, [catalogue.page, viewState.page, stickers.length, updateView]);
 
+  const handleCloseInspector = useCallback(() => {
+    const id = viewState.id;
+    closeSticker();
+    window.setTimeout(() => {
+      document.querySelector(`[data-sticker-id="${id}"]`)?.focus({ preventScroll: false });
+    }, 0);
+  }, [closeSticker, viewState.id]);
 
-  const {
-    filteredStickers, totalCount, staticCount, animatedCount, stickersByDate, sortedDates
-  } = selectLibrary(stickers, activeTab, searchQuery, visibleCount);
+  // "/" focuses search from anywhere outside a text field.
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+      if (document.querySelector('dialog[open], .editor-modal-backdrop')) return;
+      event.preventDefault();
+      if (viewState.view !== 'library') updateView({ view: 'library' }, { push: true });
+      window.setTimeout(() => searchRef.current?.focus(), 0);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [viewState.view, updateView]);
+
+  // Files dropped anywhere in the window go through the same local import path.
+  useEffect(() => {
+    const onDragEnter = (event) => {
+      if (!hasFiles(event)) return;
+      dragDepthRef.current += 1;
+      setDragActive(true);
+    };
+    const onDragOver = (event) => { if (hasFiles(event)) event.preventDefault(); };
+    const onDragLeave = (event) => {
+      if (!hasFiles(event)) return;
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (!dragDepthRef.current) setDragActive(false);
+    };
+    const onDrop = (event) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      dragDepthRef.current = 0;
+      setDragActive(false);
+      setImportOpen(true);
+      handleManualFiles(event.dataTransfer.files);
+    };
+    window.addEventListener('dragenter', onDragEnter);
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('dragleave', onDragLeave);
+    window.addEventListener('drop', onDrop);
+    return () => {
+      window.removeEventListener('dragenter', onDragEnter);
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('dragleave', onDragLeave);
+      window.removeEventListener('drop', onDrop);
+    };
+  }, [handleManualFiles]);
+
+  const navigate = (view) => updateView({ view, id: null }, { push: true });
+  const showNeedsAction = () => updateView({ view: 'library', status: 'action', type: 'all', q: '', page: 1, id: null }, { push: true });
+
   return (
-    <div className="app-container">
-      <StatusSection
-        socketConnected={socketConnected}
-        bootstrapState={bootstrapState}
-        bootstrapError={bootstrapError}
-        captureStatus={captureStatus}
-        sessionInfo={sessionInfo}
-        outputPaths={outputPaths}
-        folderCopySuccess={folderCopySuccess}
-        copyFolderPath={copyFolderPath}
-        handleResetSession={handleResetSession}
+    <div className={`app bg-${preferences.previewBackground}`}>
+      <AppHeader
+        view={viewState.view}
+        onNavigate={navigate}
+        onImport={() => setImportOpen(true)}
+        importDisabled={bootstrapState !== 'ready'}
+        status={{
+          bootstrapState, bootstrapError, socketConnected, captureStatus, sessionInfo,
+          onRetry: retryConnection, onResetBudget: actions.handleResetSession
+        }}
       />
 
-      <LibraryStats totalCount={totalCount} staticCount={staticCount} animatedCount={animatedCount} />
-
-      {/* Main Section */}
-      <main className="main-section">
-
-        <ManualImportZone
-          manualDragOver={manualDragOver}
-          setManualDragOver={setManualDragOver}
-          manualImporting={manualImporting}
-          manualAutoConvert={manualAutoConvert}
-          setManualAutoConvert={setManualAutoConvert}
-          bootstrapState={bootstrapState}
-          fileInputRef={fileInputRef}
-          handleManualFiles={handleManualFiles}
-        />
-        
-        {/* Glow Search Filter Container */}
-        <div className="search-container">
-          <label className="sr-only" htmlFor="sticker-search">Search stickers</label>
-          <input
-            id="sticker-search"
-            type="search"
-            placeholder="Search stickers by ID, filename, or manual tags…"
-            value={searchQuery}
-            onChange={(event) => { setSearchQuery(event.target.value); setVisibleCount(PAGE_SIZE); }}
-            className="search-input"
+      {viewState.view === 'health' ? (
+        <main id="main-content" className="workspace" tabIndex={-1}>
+          <HealthView
+            storage={captureStatus.storage}
+            outputPath={actions.outputPath}
+            copyText={actions.copyText}
+            refreshStatus={refreshStatus}
+            onShowNeedsAction={showNeedsAction}
+            handleArchiveLibrary={actions.handleArchiveLibrary}
+            archiving={actions.archiving}
+            bootstrapState={bootstrapState}
+            libraryTotal={stickers.length}
           />
-        </div>
-
-        {/* Filters and Actions */}
-        <div className="filter-bar">
-          <div className="tabs" role="group" aria-label="Sticker type filter">
-            <button 
-              className={`tab-btn ${activeTab === 'all' ? 'active' : ''}`}
-              onClick={() => { setActiveTab('all'); setVisibleCount(PAGE_SIZE); }}
-              aria-pressed={activeTab === 'all'}
-            >
-              All Intercepted
-            </button>
-            <button 
-              className={`tab-btn ${activeTab === 'static' ? 'active' : ''}`}
-              onClick={() => { setActiveTab('static'); setVisibleCount(PAGE_SIZE); }}
-              aria-pressed={activeTab === 'static'}
-            >
-              Static ({staticCount})
-            </button>
-            <button 
-              className={`tab-btn ${activeTab === 'animated' ? 'active' : ''}`}
-              onClick={() => { setActiveTab('animated'); setVisibleCount(PAGE_SIZE); }}
-              aria-pressed={activeTab === 'animated'}
-            >
-              Animated ({animatedCount})
-            </button>
-          </div>
-
-          {stickers.length > 0 && (
-            <button
-              type="button"
-              className="archive-btn"
-              onClick={handleArchiveLibrary}
-              disabled={archiving || bootstrapState !== 'ready'}
-              title="Copy the current database and media to a dated archive; the active library remains unchanged"
-            >
-              <Archive size={16} aria-hidden="true" /> {archiving ? 'Creating snapshot...' : 'Create archive snapshot'}
-            </button>
+        </main>
+      ) : (
+        <div className={`workspace library-layout ${inspectorOpen ? 'has-inspector' : ''}`}>
+          <main id="main-content" tabIndex={-1}>
+            <LibraryView
+              catalogue={catalogue}
+              viewState={viewState}
+              updateView={updateView}
+              openSticker={openSticker}
+              preferences={preferences}
+              setPreference={setPreference}
+              attention={attention}
+              attentionSamples={attentionSamples}
+              bootstrapState={bootstrapState}
+              bootstrapError={bootstrapError}
+              onRetry={retryConnection}
+              onImport={() => setImportOpen(true)}
+              searchRef={searchRef}
+            />
+          </main>
+          {inspectorOpen && (
+            <StickerInspector
+              key={viewState.id}
+              sticker={selectedSticker}
+              loading={bootstrapState !== 'ready' || !stickers.length}
+              onClose={handleCloseInspector}
+              handleConvert={actions.handleConvert}
+              openEditor={editor.openEditor}
+              triggerBrowserDownload={actions.triggerBrowserDownload}
+              handleSaveTags={actions.handleSaveTags}
+              selectedStartTimes={selectedStartTimes}
+              setSelectedStartTimes={setSelectedStartTimes}
+              copyText={actions.copyText}
+            />
           )}
         </div>
+      )}
 
-        <StickerGroups
-          filteredStickers={filteredStickers}
-          sortedDates={sortedDates}
-          stickersByDate={stickersByDate}
-          selectedStartTimes={selectedStartTimes}
-          setSelectedStartTimes={setSelectedStartTimes}
-          editingTags={editingTags}
-          setEditingTags={setEditingTags}
-          handleSaveTags={handleSaveTags}
-          handleConvert={handleConvert}
-          openEditor={openEditor}
-          triggerBrowserDownload={triggerBrowserDownload}
-          visibleCount={visibleCount}
-          setVisibleCount={setVisibleCount}
-        />
-
-        {/* Output instructions helper card */}
-        {stickers.some(s => s.status === 'converted') && (
-          <div className="glass-panel instructions-panel">
-            <Info size={22} style={{ color: 'var(--accent-cyan)', flexShrink: 0, marginTop: '2px' }} />
-            <div>
-              <h4>Stickers Export & Upload Guide</h4>
-              <p style={{ marginTop: '4px' }}>
-                Converted files are saved to the directories reported by the local server:
-                <br />
-                • Animated WebM: <code style={{ color: 'var(--accent-fuchsia)' }}>{outputPath('animated')}</code>
-                <br />
-                • Static WebP: <code style={{ color: 'var(--accent-emerald)' }}>{outputPath('statics')}</code>
-                <br />
-                Upload them manually through the official Telegram <a href="https://t.me/stickers" target="_blank" rel="noreferrer" style={{ color: 'var(--accent-purple)', fontWeight: 700, textDecoration: 'none' }}>@Stickers</a> bot. This application never publishes to Telegram automatically.
-              </p>
-            </div>
-          </div>
-        )}
-      </main>
+      <ImportPanel
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        {...importer}
+        bootstrapState={bootstrapState}
+        onShowInLibrary={() => {
+          setImportOpen(false);
+          updateView({ view: 'library', q: '', type: 'all', status: 'all', sort: 'newest', page: 1, id: null }, { push: true });
+        }}
+      />
 
       <EditorModal {...editor} />
 
-      {/* Premium Toast Notification */}
-      {toastMessage && (
-        <div className="toast glass-panel" role="status" aria-live="polite" aria-atomic="true">
-          {toastMessage.includes('❌') ? (
-            <AlertTriangle size={18} style={{ color: 'var(--status-red)' }} />
-          ) : (
-            <CheckCircle size={18} style={{ color: 'var(--accent-emerald)' }} />
-          )}
-          <span>{toastMessage}</span>
+      {dragActive && !importOpen && (
+        <div className="drop-overlay" aria-hidden="true">
+          <p>Drop images or videos to import them locally</p>
         </div>
       )}
+
+      <div className="toast-region">
+        {toast && (
+          <div className={`toast tone-${toast.tone === 'error' ? 'problem' : 'ok'}`} role={toast.tone === 'error' ? 'alert' : 'status'}>
+            {toast.tone === 'error'
+              ? <CircleAlert size={18} aria-hidden="true" />
+              : <CircleCheck size={18} aria-hidden="true" />}
+            <span>{toast.message}</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

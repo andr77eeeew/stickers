@@ -225,7 +225,7 @@ export function useStickerEditor({ setStickers, selectedStartTimes, showToast })
         if (!response.ok) throw new Error(result.error || 'Animated edit compile failed.');
 
         setStickers(prev => prev.map(s => s.id === editingSticker.id ? { ...s, ...result.sticker } : s));
-        showToast(`✨ Customized Animated Sticker compiled successfully! Saved to output/animated/`);
+        showToast('Edited sticker saved and converted (WebM).');
       } else {
         // Upload base64 PNG data for high-speed static WebP conversion
         const canvas = canvasRef.current;
@@ -244,12 +244,12 @@ export function useStickerEditor({ setStickers, selectedStartTimes, showToast })
         if (!response.ok) throw new Error(result.error || 'Static edit compile failed.');
 
         setStickers(prev => prev.map(s => s.id === editingSticker.id ? { ...s, ...result.sticker } : s));
-        showToast(`✨ Customized Static Sticker saved successfully! Saved to output/statics/`);
+        showToast('Edited sticker saved and converted (WebP).');
       }
 
       setEditingSticker(null);
     } catch (err) {
-      showToast(`❌ Editing failed: ${err.message}`);
+      showToast(`Editing failed: ${err.message}`, 'error');
     } finally {
       setEditorSaving(false);
     }

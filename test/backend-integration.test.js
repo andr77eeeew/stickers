@@ -358,6 +358,7 @@ test('isolated server enforces auth and processes only supplied local bytes', { 
     assert.equal(manualResponse.status, 200);
     const manualResult = await manualResponse.json();
     assert.equal(manualResult.imported, 1);
+    assert.equal(manualResult.results[0].sticker.outputSizeBytes, null, 'unconverted stickers report no output');
     const staticId = manualResult.results[0].sticker.id;
     assert.deepEqual(fs.readdirSync(path.join(tempDir, 'uploads')), []);
 
@@ -393,6 +394,9 @@ test('isolated server enforces auth and processes only supplied local bytes', { 
     }).then((response) => response.json());
     const preservedStatic = afterFailedStaticConversion.find((sticker) => sticker.id === staticId);
     assert.equal(preservedStatic.status, 'converted');
+    assert.equal(preservedStatic.outputSizeBytes, fs.statSync(staticOutputPath).size, 'output size is measured from disk');
+    const storedDatabase = JSON.parse(fs.readFileSync(path.join(outputDir, 'stickers_db.json'), 'utf8'));
+    assert.ok(storedDatabase.stickers.every((sticker) => !('outputSizeBytes' in sticker)), 'measured size is never persisted');
     assert.match(preservedStatic.error, /Static stickers only support frame 0/);
     assert.equal(
       crypto.createHash('sha256').update(fs.readFileSync(staticOutputPath)).digest('hex'),

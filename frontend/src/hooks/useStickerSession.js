@@ -16,6 +16,8 @@ export function useStickerSession() {
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const mountedRef = useRef(false);
+  const bootstrapRef = useRef(null);
+  const refreshStatusRef = useRef(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -115,6 +117,17 @@ export function useStickerSession() {
       }
     };
 
+    bootstrapRef.current = () => {
+      window.clearTimeout(reconnectTimerRef.current);
+      bootstrap();
+    };
+    refreshStatusRef.current = async () => {
+      const response = await apiFetch('/api/status');
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Status request failed');
+      applyStatus(result);
+      return result;
+    };
     bootstrap();
     return () => {
       mountedRef.current = false;
@@ -131,6 +144,8 @@ export function useStickerSession() {
     bootstrapState, bootstrapError,
     captureStatus, setCaptureStatus,
     sessionInfo, setSessionInfo,
-    outputPaths, socketConnected
+    outputPaths, socketConnected,
+    retryConnection: () => bootstrapRef.current?.(),
+    refreshStatus: () => refreshStatusRef.current?.()
   };
 }

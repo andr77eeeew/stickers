@@ -1,73 +1,90 @@
 import { useRef, useState } from 'react';
 import { apiFetch } from '../lib/api';
 
+export const IMPORT_EXTENSIONS = /\.(png|jpe?g|webp|gif|tif{1,2}|avif|mp4|webm|mov|mkv|m4v)$/i;
+export const IMPORT_ACCEPT = '.png,.jpg,.jpeg,.webp,.gif,.tif,.tiff,.avif,.mp4,.webm,.mov,.mkv,.m4v,image/*,video/*';
+export const IMPORT_MAX_FILES = 30;
+
+/** Manual local import — zero TikTok traffic. */
 export function useManualImport({ bootstrapState, setStickers, showToast, handleConvert }) {
   const [manualImporting, setManualImporting] = useState(false);
   const [manualAutoConvert, setManualAutoConvert] = useState(true);
-  const [manualDragOver, setManualDragOver] = useState(false);
+  // Report of the latest batch, straight from the server response. In memory only.
+  const [importReport, setImportReport] = useState(null);
   const fileInputRef = useRef(null);
 
-  /** Manual local import — zero TikTok traffic */
   const handleManualFiles = async (fileList) => {
     if (bootstrapState !== 'ready') {
-      showToast('Wait for the local authenticated session before importing files.');
+      showToast('Wait for the local service before importing files.', 'error');
       return;
     }
 
     const files = Array.from(fileList || []);
     if (!files.length) return;
 
-    const allowed = /\.(png|jpe?g|webp|gif|tif{1,2}|avif|mp4|webm|mov|mkv|m4v)$/i;
-    const valid = files.filter((f) => allowed.test(f.name));
+    const valid = files.filter((file) => IMPORT_EXTENSIONS.test(file.name));
+    const skipped = files.filter((file) => !IMPORT_EXTENSIONS.test(file.name)).map((file) => file.name);
     if (!valid.length) {
-      showToast('Unsupported files. Use png, jpg, webp, gif, mp4, webm, mov…');
+      setImportReport({ error: 'None of these files are supported. Use PNG, JPG, WebP, GIF, TIFF, AVIF, MP4, WebM, MOV, MKV or M4V.', skipped, results: [] });
+      return;
+    }
+    if (valid.length > IMPORT_MAX_FILES) {
+      setImportReport({ error: `Choose up to ${IMPORT_MAX_FILES} files at a time.`, skipped, results: [] });
       return;
     }
 
     setManualImporting(true);
+    setImportReport(null);
     try {
       const form = new FormData();
-      valid.forEach((f) => form.append('files', f));
+      valid.forEach((file) => form.append('files', file));
 
-      const response = await apiFetch(`/api/import/files`, {
-        method: 'POST',
-        body: form
-      });
-      const result = await response.json();
+      const response = await apiFetch('/api/import/files', { method: 'POST', body: form });
+      let result = {};
+      try {
+        result = await response.json();
+      } catch {
+        result = {};
+      }
       if (!response.ok) {
-        throw new Error(result.error || 'Import failed');
+        setImportReport({
+          error: response.status === 413
+            ? 'Files exceed the upload limit. Try a smaller batch.'
+            : result.error || 'Import failed.',
+          skipped,
+          results: []
+        });
+        return;
       }
 
-      const newOnes = (result.results || [])
-        .filter((r) => r.success && r.sticker)
-        .map((r) => r.sticker);
+      const results = result.results || [];
+      setImportReport({
+        imported: result.imported || 0,
+        duplicates: result.duplicates || 0,
+        failed: result.failed || 0,
+        skipped,
+        results
+      });
+
+      const newOnes = results
+        .filter((entry) => entry.success && entry.sticker && !entry.duplicate)
+        .map((entry) => entry.sticker);
 
       if (newOnes.length) {
-        setStickers((prev) => {
-          const ids = new Set(prev.map((s) => s.id));
-          const merged = [...newOnes.filter((s) => !ids.has(s.id)), ...prev];
-          return merged;
+        setStickers((previous) => {
+          const ids = new Set(previous.map((sticker) => sticker.id));
+          return [...newOnes.filter((sticker) => !ids.has(sticker.id)), ...previous];
         });
       }
 
-      showToast(
-        `Import: ${result.imported} new, ${result.duplicates || 0} dup, ${result.failed || 0} failed`
-      );
-
-      if (manualAutoConvert && newOnes.length) {
-        for (const s of newOnes) {
-          if (s.status === 'captured' && !result.results?.find((r) => r.sticker?.id === s.id && r.duplicate)) {
-            // only convert truly new non-duplicate imports
-            const wasDup = (result.results || []).find((r) => r.sticker?.id === s.id)?.duplicate;
-            if (!wasDup) {
-              await handleConvert(s.id);
-            }
-          }
+      if (manualAutoConvert) {
+        for (const sticker of newOnes) {
+          if (sticker.status === 'captured') await handleConvert(sticker.id);
         }
       }
-    } catch (err) {
-      console.error('Manual import error:', err);
-      showToast(`Import failed: ${err.message}`);
+    } catch (error) {
+      console.error('Manual import error:', error);
+      setImportReport({ error: `Import failed: ${error.message}`, skipped, results: [] });
     } finally {
       setManualImporting(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -76,6 +93,6 @@ export function useManualImport({ bootstrapState, setStickers, showToast, handle
 
   return {
     manualImporting, manualAutoConvert, setManualAutoConvert,
-    manualDragOver, setManualDragOver, fileInputRef, handleManualFiles
+    importReport, setImportReport, fileInputRef, handleManualFiles
   };
 }

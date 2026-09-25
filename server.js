@@ -199,8 +199,30 @@ function refreshStorageHealth() {
   return storageHealth;
 }
 
+// Measured on every read so the UI never trusts a stale or legacy size field.
+// The value is derived for clients only and is never written to the database.
+function measureOutputSize(sticker) {
+  if (typeof sticker.convertedPath !== 'string' || !sticker.convertedPath) return null;
+  try {
+    const diskPath = resolveUnder(OUTPUT_DIR, sticker.convertedPath.replace(/^[/\\]+/, ''));
+    const stat = fs.statSync(diskPath);
+    return stat.isFile() ? stat.size : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function toClientSticker(sticker) {
+  if (!sticker) return sticker;
+  return { ...sticker, outputSizeBytes: measureOutputSize(sticker) };
+}
+
+const STICKER_MESSAGE_TYPES = new Set(['new_sticker', 'sticker_update']);
+
 function broadcast(message) {
-  const payload = JSON.stringify(message);
+  const payload = JSON.stringify(STICKER_MESSAGE_TYPES.has(message.type)
+    ? { ...message, data: toClientSticker(message.data) }
+    : message);
   wss.clients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) client.send(payload);
   });
@@ -620,7 +642,7 @@ app.post('/api/ingest', security.requireExtension, async (req, res) => {
     return res.json({
       success: true,
       duplicate: captured.duplicate,
-      sticker: captured.sticker,
+      sticker: toClientSticker(captured.sticker),
       session: sessionBudget.snapshot()
     });
   } catch (error) {
@@ -660,7 +682,7 @@ app.post('/api/session/reset', (_req, res) => {
 });
 
 app.get('/api/stickers', (_req, res) => {
-  res.json(capturedStickers);
+  res.json(capturedStickers.map(toClientSticker));
 });
 
 app.post('/api/import/files', (req, res) => {
@@ -703,7 +725,7 @@ app.post('/api/import/files', (req, res) => {
             notes: normalized.notes
           });
           entry.success = true;
-          entry.sticker = registered.sticker;
+          entry.sticker = toClientSticker(registered.sticker);
           entry.duplicate = registered.duplicate;
         } catch (importError) {
           entry.error = importError.message;
@@ -1068,7 +1090,7 @@ async function runQueuedConversion(res, sticker, job) {
         throw error;
       }
     }, { key: sticker.id });
-    return res.json({ success: true, sticker: result });
+    return res.json({ success: true, sticker: toClientSticker(result) });
   } catch (error) {
     const queueFull = error.message === 'Conversion queue is full';
     const statusCode = queueFull ? 503 : error.statusCode || 500;
@@ -1536,7 +1558,7 @@ app.post('/api/stickers/:id/tags', (req, res) => {
   console.log(`[Tags Update] Updated tags for ${id}:`, sticker.tags);
   broadcast({ type: 'sticker_update', data: sticker });
 
-  res.json({ success: true, sticker });
+  res.json({ success: true, sticker: toClientSticker(sticker) });
 });
 
 // WebSocket Server Handshake
@@ -1563,7 +1585,7 @@ wss.on('connection', (ws) => {
     type: 'init',
     data: {
       ...getStatusPayload(),
-      stickers: capturedStickers
+      stickers: capturedStickers.map(toClientSticker)
     }
   }));
 });
