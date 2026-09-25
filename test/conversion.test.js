@@ -49,6 +49,41 @@ test('normalizes timing, transforms, dimensions and XML safely', () => {
   assert.equal(transforms.topText.length, 100);
 });
 
+test('static encoder keeps quality 95 when it fits and searches lower only when needed', { timeout: 120000 }, async () => {
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'stickers-static-quality-test-'));
+  try {
+    const width = 400;
+    const height = 300;
+    const pixels = Buffer.alloc(width * height * 3);
+    let seed = 1;
+    for (let index = 0; index < pixels.length; index += 1) {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      pixels[index] = seed >> 23;
+    }
+    const input = path.join(tempDir, 'noise.png');
+    await sharp(pixels, { raw: { width, height, channels: 3 } }).png().toFile(input);
+    const output = path.join(tempDir, 'noise.webp');
+
+    const roomy = await compressStaticSticker(input, output, 512, 384);
+    assert.equal(roomy.quality, 95);
+    assert.equal((await fs.promises.stat(output)).size, roomy.sizeBytes);
+
+    const limit = Math.floor(roomy.sizeBytes * 0.6);
+    const tight = await compressStaticSticker(input, output, 512, 384, limit);
+    assert.ok(tight.quality >= 30 && tight.quality < 95);
+    assert.ok(tight.sizeBytes <= limit);
+    assert.equal((await fs.promises.stat(output)).size, tight.sizeBytes);
+
+    await assert.rejects(
+      compressStaticSticker(input, output, 512, 384, 1024),
+      /cannot fit within 1024 bytes/
+    );
+    assert.equal((await fs.promises.stat(output)).size, tight.sizeBytes);
+  } finally {
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('static and animated encoders enforce final size limits', { timeout: 120000 }, async () => {
   const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'stickers-conversion-test-'));
   try {
