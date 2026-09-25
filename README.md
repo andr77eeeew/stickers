@@ -48,11 +48,12 @@ npm start
 
 ## Основной поток: ручной импорт
 
-1. Запустите приложение и дождитесь статуса **Offline mode · manual import**.
-2. Перетащите `png`, `jpg`, `webp`, `gif`, `tif`, `avif`, `mp4`, `webm`, `mov`, `mkv` или `m4v` в область импорта.
-3. При необходимости выберите временной диапазон анимации, добавьте теги или откройте Canvas Editor.
-4. Конвертируйте и скачайте результат либо откройте server-reported output path.
-5. Загружайте файлы в Telegram вручную через официальный `@Stickers`; проект не использует Telegram API.
+1. Запустите приложение; кнопка состояния в шапке показывает **Local · Manual**.
+2. Нажмите **Import** или перетащите `png`, `jpg`, `webp`, `gif`, `tif`, `avif`, `mp4`, `webm`, `mov`, `mkv` или `m4v` в любое место окна (до 30 файлов за раз). Панель импорта показывает результат по каждому файлу; с включённым auto-convert новые файлы конвертируются одной задачей.
+3. В библиотеке фильтруйте **Ready** / **Needs action**, тип и поиск (ID, исходное имя, теги); фон превью можно переключить на шахматку или приблизительный фон чата Telegram. Вид, фильтры и выбранный стикер сохраняются в адресной строке.
+4. Откройте стикер: блок **Telegram check** показывает формат, фактический размер файла к лимиту, длительность, размеры и растягивание исходника. Отсюда — Convert / Retry / Re-convert, **Edit**, теги и **Download**.
+5. **Select** включает выбор нескольких стикеров для пакетной конвертации и тегов; прогресс и отмена очереди — в панели **Jobs** (история в памяти сервера, последние 20 задач).
+6. Загружайте файлы в Telegram вручную через официальный `@Stickers`; проект не использует Telegram API.
 
 Ручной импорт не обращается к TikTok и не расходует DevTools capture budget.
 
@@ -83,9 +84,11 @@ Backend не может достоверно определить, открыт�
 
 TikTok Data Portability/Download Your Data можно исследовать отдельно, но текущая документация Direct Messages не гарантирует media bytes стикеров. Эта возможность не является частью runtime приложения.
 
-## Библиотека и archive snapshots
+## Health, проверка хранилища и archive snapshots
 
-Кнопка **Create archive snapshot** вызывает `POST /api/library/archive`. Сервер копирует текущие database/media files и manifest с SHA-256 в датированный каталог `output/archives/`. Активная библиотека остаётся на месте и продолжает работать.
+Страница **Health** показывает сводку хранилища. **Run check** (`POST /api/storage/check`) сравнивает базу с диском и перечисляет конкретные записи и файлы: missing original/output, interrupted conversions, unlinked files, temporary entries. Проверка меняет только флаги health — ничего не удаляет, не перемещает и не чинит.
+
+**Create archive snapshot** вызывает `POST /api/library/archive`. Сервер копирует текущие database/media files и manifest с SHA-256 в датированный каталог `output/archives/`. Активная библиотека остаётся на месте. Список архивов и **Verify files** пересчитывают хэши по manifest и сообщают о пропавших, изменённых и лишних файлах, не изменяя архив. Восстановления из архива в UI нет.
 
 Web API не предоставляет физическое удаление всей библиотеки. Перед ручным удалением сначала создайте snapshot и проверьте manifest.
 
@@ -95,13 +98,16 @@ Web API не предоставляет физическое удаление в
 npm run check
 ```
 
-Команда запускает backend/unit tests, frontend lint и production build. Для точечной проверки доступны:
+Команда запускает backend/unit/integration tests, frontend lint и production build. Для точечной проверки доступны:
 
 ```powershell
 npm test
 npm run lint
 npm run build
+npm run test:e2e
 ```
+
+`npm run test:e2e` собирает dashboard и прогоняет UI-смоук в headless Chrome (установленный Google Chrome, через `playwright-core`) на пустой временной библиотеке: импорт, поиск, клавиатурное скачивание, теги, редактор, пакетные задачи, Health, переподключение, отсутствие горизонтального переполнения 320–1440 px и каталог из 1000 синтетических записей. Тест не открывает TikTok или Telegram и не трогает `output/`.
 
 Live-приёмка выполняется вручную и только после локальных тестов: открыть DevTools до загрузки одного статического и одного анимированного тестового стикера, затем убедиться в Chrome Network, что расширение не создало дополнительных запросов к TikTok/CDN.
 
@@ -117,8 +123,18 @@ Dashboard сначала вызывает `GET /api/session`; сервер ус�
 | `POST` | `/api/import/files` | Локальный ручной импорт media |
 | `POST` | `/api/session/reset` | Начать новый DevTools capture budget |
 | `POST` | `/api/library/archive` | Создать неизменяемый snapshot библиотеки |
-| `GET` | `/api/stickers` | Получить записи библиотеки |
-| `POST` | `/api/convert` | Конвертировать стикер в формат Telegram |
+| `GET` | `/api/library/archives` | Список архивов из manifest |
+| `POST` | `/api/library/archives/:id/verify` | Read-only проверка SHA-256 архива |
+| `POST` | `/api/storage/check` | Проверка хранилища с элементами по категориям (без удаления) |
+| `GET` | `/api/stickers` | Записи библиотеки; `outputSizeBytes` измеряется по файлу при каждом чтении |
+| `POST` | `/api/convert` | Конвертировать один стикер в формат Telegram |
+| `POST` | `/api/edit-convert-static`, `/api/edit-convert-animated` | Сохранить правку из редактора и конвертировать |
+| `POST` | `/api/stickers/:id/tags` | Заменить теги одного стикера |
+| `GET` | `/api/jobs` | Пакетные задачи текущего процесса сервера |
+| `POST` | `/api/jobs/convert`, `/api/jobs/tags` | Пакетная конвертация / теги с отчётом по каждому ID |
+| `POST` | `/api/jobs/:id/cancel` | Отменить не начатые элементы задачи |
+
+WebSocket `/ws` отправляет `init` (записи, статус, задачи), `new_sticker`, `sticker_update`, `status` и `job_update`.
 
 ## Форматы Telegram
 
@@ -132,10 +148,12 @@ Backend обязан проверять фактический итоговый 
 ```text
 extension/             DevTools network-body capture, popup и durable localhost queue
 frontend/              React/Vite dashboard
-lib/                   URL/media policy, storage, import и safety helpers
+lib/                   URL/media policy, storage, jobs, archives, import и safety helpers
 output/                captured, statics, animated, archives и database
 README.md              запуск и архитектура
 docs/ACCOUNT_SAFETY.md подробная модель риска
+docs/redesign/          план редизайна, спецификация и отчёты этапов
+test/                  unit/integration тесты; test/e2e — UI-смоук в Chrome
 server.js              loopback HTTP/WebSocket API и media pipeline
 ```
 

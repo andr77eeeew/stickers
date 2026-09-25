@@ -8,15 +8,16 @@ import { describeFailure } from '../lib/jobModel';
 
 function NumberField({ label, unit, value, limits, onChange, onCommit, disabled }) {
   const id = useId();
+  const labelId = useId();
   return (
     <div className="editor-field">
-      <label htmlFor={id} className="editor-field-row">
+      <label htmlFor={id} id={labelId} className="editor-field-row">
         <span>{label}</span>
       </label>
       <div className="number-field">
         <input
           type="range"
-          aria-labelledby={id}
+          aria-labelledby={labelId}
           min={limits.min}
           max={limits.max}
           step={limits.step}

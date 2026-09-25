@@ -180,7 +180,12 @@ export default function App() {
       if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
       if (document.querySelector('dialog[open]') || viewState.view === 'editor') return;
       event.preventDefault();
-      if (viewState.view !== 'library') updateView({ view: 'library' }, { push: true });
+      // Focus synchronously when the field exists so the next keystroke lands in it.
+      if (viewState.view === 'library' && searchRef.current) {
+        searchRef.current.focus();
+        return;
+      }
+      updateView({ view: 'library' }, { push: true });
       window.setTimeout(() => searchRef.current?.focus(), 0);
     };
     document.addEventListener('keydown', onKeyDown);

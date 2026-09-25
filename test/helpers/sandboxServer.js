@@ -41,23 +41,36 @@ function waitForReady(child) {
  * Starts server.js against an empty library in a temp folder and returns a
  * dashboard-authenticated client. Never points at the real output folder.
  */
-async function startSandboxServer(prefix = 'stickers-sandbox-test-') {
+async function startSandboxServer(prefix = 'stickers-sandbox-test-', { seed = null } = {}) {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   const outputDir = path.join(sandbox, 'output');
   const tempDir = path.join(sandbox, 'temp');
+  if (seed) seed({ outputDir, tempDir });
   const port = await reservePort();
   const origin = `http://127.0.0.1:${port}`;
-  const child = spawn(process.execPath, ['server.js'], {
-    cwd: projectRoot,
-    env: { ...process.env, PORT: String(port), INGEST_TOKEN: '', STICKER_OUTPUT_DIR: outputDir, STICKER_TEMP_DIR: tempDir },
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
-  await waitForReady(child);
+  let child;
+  const headers = { Origin: origin };
 
-  const session = await fetch(`${origin}/api/session`, { headers: { Origin: origin } });
-  const cookie = session.headers.get('set-cookie').split(';')[0];
-  const headers = { Origin: origin, Cookie: cookie };
+  const launch = async () => {
+    child = spawn(process.execPath, ['server.js'], {
+      cwd: projectRoot,
+      env: { ...process.env, PORT: String(port), INGEST_TOKEN: '', STICKER_OUTPUT_DIR: outputDir, STICKER_TEMP_DIR: tempDir },
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    await waitForReady(child);
+    const session = await fetch(`${origin}/api/session`, { headers: { Origin: origin } });
+    headers.Cookie = session.headers.get('set-cookie').split(';')[0];
+  };
+
+  const halt = async () => {
+    if (!child || child.exitCode !== null) return;
+    const exited = new Promise((resolve) => child.once('exit', resolve));
+    child.kill();
+    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 3_000))]);
+  };
+
+  await launch();
 
   const request = async (route, { method = 'GET', body } = {}) => {
     const response = await fetch(`${origin}${route}`, {
@@ -74,15 +87,18 @@ async function startSandboxServer(prefix = 'stickers-sandbox-test-') {
     return { status: response.status, body: json };
   };
 
+  /** Stops and starts the same server on the same library, like a user restart. */
+  const restart = async () => {
+    await halt();
+    await launch();
+  };
+
   const stop = async () => {
-    if (child.exitCode === null) {
-      child.kill();
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    }
+    await halt();
     fs.rmSync(sandbox, { recursive: true, force: true });
   };
 
-  return { origin, port, cookie, headers, outputDir, tempDir, request, stop };
+  return { origin, port, get cookie() { return headers.Cookie; }, headers, outputDir, tempDir, request, restart, stop };
 }
 
 module.exports = { startSandboxServer };
