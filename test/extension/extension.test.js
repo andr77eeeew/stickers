@@ -195,14 +195,14 @@ test('local delivery policy rejects non-loopback and lookalike servers', () => {
 test('delivery ACK and retry rules preserve at-least-once semantics', () => {
   assert.deepEqual(
     DeliveryPolicy.classifyIngestResponse(200, { success: true }),
-    { action: 'ack', duplicate: false }
+    { action: 'ack', duplicate: false, serverState: 'online' }
   );
   assert.deepEqual(
     DeliveryPolicy.classifyIngestResponse(200, {
       success: true,
       duplicate: true
     }),
-    { action: 'ack', duplicate: true }
+    { action: 'ack', duplicate: true, serverState: 'online' }
   );
   assert.equal(
     DeliveryPolicy.classifyIngestResponse(422, { error: 'bad body' }).action,
@@ -356,4 +356,23 @@ test('capture requires an explicit v2 opt-in', () => {
   assert.match(background, /current\.settingsVersion !== 2/);
   assert.match(background, /updates\.captureEnabled = false/);
   assert.match(devtools, /get\(\{ captureEnabled: false \}/);
+});
+test('popup and panel share one status vocabulary', () => {
+  const StatusText = require(path.join(extensionRoot, 'shared', 'statusText.js'));
+  assert.deepEqual(StatusText.describeListener('watching'), { tone: 'ok', text: 'Watching TikTok tab' });
+  assert.equal(StatusText.describeListener('listening').text, 'DevTools not open', 'no legacy "Listening" claim');
+  assert.equal(StatusText.describeServer('unauthorized').text, 'Token rejected');
+  assert.equal(StatusText.describeServer('capture_disabled').tone, 'problem');
+  assert.deepEqual(StatusText.describeQueue({ count: 2, paused: 2 }, 'capture_budget_exhausted'), {
+    tone: 'pending',
+    text: '2 held: budget paused'
+  });
+  assert.equal(StatusText.describeQueue({ count: 3, blocked: 1 }).tone, 'problem');
+  assert.equal(StatusText.describeQueue({ count: 0 }).text, 'Empty');
+  assert.equal(
+    StatusText.heldFileName({ id: 'abcdef0123456789', mimeType: 'image/webp' }),
+    'sticker_abcdef012345.webp'
+  );
+  assert.equal(StatusText.formatBytesFromBase64(4096), '3 KB');
+  assert.equal(StatusText.formatBytesFromBase64(2796204), '2.0 MB');
 });

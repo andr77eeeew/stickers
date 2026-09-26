@@ -75,18 +75,19 @@ npm start
 
 1. Откройте `chrome://extensions`, включите Developer mode и выберите **Load unpacked** → `extension/`.
 2. Откройте popup расширения. При первой установке token генерируется локально; скопируйте его в `INGEST_TOKEN` файла `.env` и перезапустите backend.
-3. Оставьте server URL равным `http://127.0.0.1:3001` или `http://localhost:3001`.
-4. Popup отдельно показывает состояние DevTools listener, localhost server и durable retry queue.
+3. Оставьте server URL равным `http://127.0.0.1:3001` или `http://localhost:3001`. Расширение доставляет только на порт 3001; при другом `PORT` сервер предупреждает об этом при старте.
+4. Включите **Capture enabled**. Popup показывает состояние слушателя (`Capture off`, `DevTools not open`, `DevTools on another site`, `Watching TikTok tab`), локального сервера (`Online`, `Token rejected`, `Capture disabled on server`, `Offline`…) и очереди.
 
 ### Захват
 
 1. Откройте TikTok Messages обычным способом.
-2. До появления нужного стикера откройте Chrome DevTools.
-3. Выберите панель **Sticker Capture** и оставьте её открытой.
-4. Расширение проверяет завершившиеся network responses, читает уже доступное тело через DevTools API и отправляет байты только в loopback backend.
-5. При временной localhost-ошибке payload остаётся в локальной очереди до подтверждённого ACK. Повторных TikTok/CDN-запросов нет.
+2. До появления нужного стикера откройте Chrome DevTools на этой вкладке и не закрывайте его. Выбирать панель **Sticker Capture** не обязательно: слушатель работает, пока открыт DevTools; на других сайтах тела ответов не читаются.
+3. Расширение проверяет завершившиеся network responses, читает уже доступное тело через DevTools API и отправляет байты только в loopback backend. Тип файла определяется по байтам, заголовок `Content-Type` — только подсказка.
+4. При временной localhost-ошибке payload остаётся в локальной очереди до подтверждённого ACK. Повторных TikTok/CDN-запросов нет.
+5. Когда исчерпан capture budget сервера, доставка ставится на паузу: захваты хранятся в очереди и уходят сами после **Reset budget** в dashboard. Не перезагружайте чат ради повторного захвата.
+6. Захват, который сервер отклонил (`Held captures` в popup), можно повторить, сохранить файлом для ручного импорта или удалить.
 
-Backend не может достоверно определить, открыта ли панель DevTools прямо сейчас. Поэтому dashboard показывает `awaiting`, последнее подтверждённое принятие или ошибку локальной доставки, а фактический listener state смотрите в popup расширения.
+Backend не может достоверно определить, открыт ли DevTools прямо сейчас. Поэтому dashboard показывает `awaiting`, последнее подтверждённое принятие или ошибку локальной доставки, а фактический listener state смотрите в popup расширения. Отклонённый политикой файл (например, аватар) dashboard показывает отдельно от ошибки доставки.
 
 Расширение не кликает, не скроллит и не изменяет TikTok UI; в manifest нет content script, `debugger`, `tabs` или `webRequest` permissions. Тем не менее live-capture остаётся неофициальной инструментализацией с остаточным account/policy risk. Подробнее: [Account Safety](docs/ACCOUNT_SAFETY.md).
 

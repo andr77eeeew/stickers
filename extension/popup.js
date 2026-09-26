@@ -13,8 +13,12 @@ const elements = {
   copyToken: document.getElementById('copyToken'),
   saveSettings: document.getElementById('saveSettings'),
   retryQueue: document.getElementById('retryQueue'),
-  message: document.getElementById('message')
+  message: document.getElementById('message'),
+  heldSection: document.getElementById('heldSection'),
+  heldList: document.getElementById('heldList')
 };
+const TONE_CLASS = Object.freeze({ ok: 'ok', pending: 'warn', problem: 'bad' });
+let heldSignature = '';
 
 function storageGet(defaults) {
   return new Promise((resolve) => chrome.storage.local.get(defaults, resolve));
@@ -77,42 +81,94 @@ function setState(element, text, className) {
   element.className = className || '';
 }
 
+function setDescribed(element, description) {
+  setState(element, description.text, TONE_CLASS[description.tone]);
+}
+
 function renderStatus(status) {
   elements.captureEnabled.checked = status.captureEnabled !== false;
-  setState(
-    elements.listenerState,
-    status.listenerState === 'listening' ? 'Listening' : 'DevTools closed',
-    status.listenerState === 'listening' ? 'ok' : 'warn'
-  );
-
-  const labels = {
-    online: 'Online',
-    offline: 'Offline',
-    unauthorized: 'Token rejected',
-    configuration_required: 'Setup required',
-    unknown: 'Not checked'
-  };
-  setState(
-    elements.serverState,
-    labels[status.serverState] || status.serverState,
-    status.serverState === 'online'
-      ? 'ok'
-      : status.serverState === 'unknown'
-        ? 'warn'
-        : 'bad'
-  );
-
-  const queue = status.queue || {};
-  setState(
+  setDescribed(elements.listenerState, StatusText.describeListener(status.listenerState));
+  setDescribed(elements.serverState, StatusText.describeServer(status.serverState));
+  setDescribed(
     elements.queueState,
-    queue.blocked
-      ? `${queue.count || 0} (${queue.blocked} blocked)`
-      : String(queue.count || 0),
-    queue.blocked ? 'bad' : queue.count ? 'warn' : 'ok'
+    StatusText.describeQueue(status.queue, status.pausedReason)
   );
-  elements.lastEvent.textContent = status.lastError
-    ? `${status.lastEvent || 'Issue'}: ${status.lastError}`
-    : status.lastEvent || 'No activity yet.';
+  elements.lastEvent.textContent = status.lastEvent || 'No activity yet.';
+}
+
+function base64ToBlob(contentBase64, mimeType) {
+  const binary = atob(contentBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new Blob([bytes], { type: mimeType });
+}
+
+async function saveHeldItem(item) {
+  const file = await sendMessage({ type: 'GET_ITEM_FILE', id: item.id });
+  if (!file.ok) {
+    showMessage('This capture is no longer held.', true);
+    return;
+  }
+  const url = URL.createObjectURL(base64ToBlob(file.contentBase64, file.mimeType));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = StatusText.heldFileName(item);
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  showMessage('File saved. Import it in the dashboard with Import.', false);
+}
+
+function renderHeldItem(item) {
+  const row = document.createElement('li');
+  const label = document.createElement('span');
+  const reason = item.state === 'paused' ? 'Paused: capture budget' : `Blocked: ${item.lastError || 'rejected'}`;
+  label.textContent = `${reason} · ${StatusText.formatBytesFromBase64(item.base64Length)}`;
+
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'secondary';
+  save.textContent = 'Save file';
+  save.addEventListener('click', () => {
+    void saveHeldItem(item).catch(() => showMessage('Unable to save the file.', true));
+  });
+
+  // Discarding deletes the only copy of the bytes, so it takes two clicks.
+  const discard = document.createElement('button');
+  discard.type = 'button';
+  discard.className = 'secondary';
+  discard.textContent = 'Discard';
+  discard.addEventListener('click', async () => {
+    if (discard.dataset.armed !== 'true') {
+      discard.dataset.armed = 'true';
+      discard.textContent = 'Confirm discard';
+      return;
+    }
+    discard.disabled = true;
+    const result = await sendMessage({ type: 'DISCARD_ITEM', id: item.id }).catch(() => ({}));
+    showMessage(result.ok ? 'Capture discarded.' : 'Unable to discard the capture.', !result.ok);
+    await refreshHeld();
+    await refreshStatus();
+  });
+
+  row.append(label, save, discard);
+  return row;
+}
+
+async function refreshHeld() {
+  let items = [];
+  try {
+    const response = await sendMessage({ type: 'LIST_HELD' });
+    if (response.ok) items = response.items || [];
+  } catch {
+    return;
+  }
+  const signature = items.map((item) => `${item.id}:${item.state}`).join('|');
+  if (signature === heldSignature) return;
+  heldSignature = signature;
+  elements.heldSection.hidden = items.length === 0;
+  elements.heldList.replaceChildren(...items.map(renderHeldItem));
 }
 
 async function refreshStatus(messageType = 'GET_STATUS') {
@@ -134,6 +190,7 @@ async function load() {
   elements.ingestToken.value = settings.ingestToken || '';
   elements.captureEnabled.checked = settings.captureEnabled !== false;
   await refreshStatus('PING_SERVER');
+  await refreshHeld();
 }
 
 elements.generateToken.addEventListener('click', () => {
@@ -196,7 +253,8 @@ elements.retryQueue.addEventListener('click', async () => {
   try {
     const response = await sendMessage({ type: 'RETRY_QUEUE' });
     if (response.ok) renderStatus(response);
-    showMessage('Blocked items released for another local delivery attempt.', false);
+    showMessage('Held items released for another local delivery attempt.', false);
+    await refreshHeld();
   } catch {
     showMessage('Unable to retry the queue.', true);
   } finally {
@@ -205,4 +263,7 @@ elements.retryQueue.addEventListener('click', async () => {
 });
 
 void load();
-setInterval(() => void refreshStatus(), 2000);
+setInterval(() => {
+  void refreshStatus();
+  void refreshHeld();
+}, 2000);

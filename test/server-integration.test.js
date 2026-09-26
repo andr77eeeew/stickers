@@ -103,6 +103,33 @@ test('loopback server enforces dashboard/extension boundaries and bytes-only ing
     });
     assert.equal((await duplicate.json()).duplicate, true);
 
+    const wrongToken = await fetch(`${baseUrl}/api/ingest`, {
+      method: 'POST',
+      headers: { ...extensionHeaders, Authorization: 'Bearer wrong' },
+      body: JSON.stringify(payload)
+    });
+    assert.equal(wrongToken.status, 401);
+    assert.equal((await wrongToken.json()).code, 'TOKEN_REJECTED');
+
+    // Content refused by the sticker policy is a rejection, not a delivery failure.
+    const avatar = await fetch(`${baseUrl}/api/ingest`, {
+      method: 'POST',
+      headers: extensionHeaders,
+      body: JSON.stringify({
+        ...payload,
+        sourceUrl: 'https://p16-common-sign.tiktokcdn.com/tos-maliva-avt-0068/id~tplv-tiktokx-cropcenter:168:168.webp'
+      })
+    });
+    assert.equal(avatar.status, 400);
+    assert.equal((await avatar.json()).code, 'URL_REJECTED');
+    const afterRejection = await (await fetch(`${baseUrl}/api/status`, {
+      headers: { Origin: dashboardOrigin, Cookie: cookie }
+    })).json();
+    assert.equal(afterRejection.devtools.state, 'last_asset_accepted');
+    assert.equal(afterRejection.devtools.lastError, null);
+    assert.match(afterRejection.devtools.lastRejectedReason, /rejected/i);
+    assert.ok(afterRejection.devtools.lastRejectedAt);
+
     const har = {
       log: {
         entries: [{

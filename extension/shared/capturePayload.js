@@ -118,6 +118,13 @@
     return '';
   }
 
+  // Magic bytes need only the first 12 bytes (16 base64 characters).
+  function detectBase64ImageMime(contentBase64) {
+    const normalized = normalizeBase64(contentBase64);
+    if (!normalized || normalized.length < 16) return '';
+    return detectImageMime(base64ToBytes(normalized.slice(0, 16)));
+  }
+
   function validateCapturePayload(payload, policy) {
     if (!payload || payload.source !== 'devtools') {
       return { ok: false, reason: 'invalid_source' };
@@ -147,7 +154,11 @@
     }
 
     const detectedMimeType = detectImageMime(bytes);
-    if (!detectedMimeType || detectedMimeType !== resource.mimeType) {
+    if (
+      !detectedMimeType ||
+      !policy.allowedMimeTypes.includes(detectedMimeType) ||
+      (resource.mimeType && detectedMimeType !== resource.mimeType)
+    ) {
       return { ok: false, reason: 'content_type_mismatch' };
     }
 
@@ -162,7 +173,7 @@
       payload: {
         source: 'devtools',
         sourceUrl: resource.sourceUrl,
-        mimeType: resource.mimeType,
+        mimeType: detectedMimeType,
         contentBase64: encoded.contentBase64,
         observedAt
       }
@@ -175,6 +186,7 @@
     contentToBase64,
     base64ToBytes,
     detectImageMime,
+    detectBase64ImageMime,
     validateCapturePayload
   };
 });

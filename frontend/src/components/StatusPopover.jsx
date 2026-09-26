@@ -42,7 +42,7 @@ const describeCapture = ({ captureStatus, sessionInfo }) => {
     tone: 'pending',
     short: 'Awaiting DevTools',
     title: 'Awaiting opt-in DevTools capture',
-    detail: 'Open DevTools before the sticker loads, select the Sticker Capture panel and keep it open. No DOM automation or CDN refetch is used.'
+    detail: 'Open DevTools on the TikTok tab before the sticker loads and keep it open; the Sticker Capture panel does not need to be selected. No DOM automation or CDN refetch is used.'
   };
 };
 
@@ -132,6 +132,11 @@ export function StatusPopover({
               {capture.title}
             </p>
             <p className="popover-detail">{capture.detail}</p>
+            {devtoolsEnabled && captureStatus.devtools?.lastRejectedAt && (
+              <p className="popover-detail">
+                Last rejected {new Date(captureStatus.devtools.lastRejectedAt).toLocaleString()}: {captureStatus.devtools.lastRejectedReason}
+              </p>
+            )}
             {devtoolsEnabled && sessionInfo && (
               <div className="popover-row">
                 <span className="tabular">Session {sessionInfo.captureCount || 0}/{sessionInfo.maxCaptures || '—'}</span>

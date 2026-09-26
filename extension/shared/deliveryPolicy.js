@@ -38,7 +38,26 @@
     return Math.min(maxMs, baseMs * 2 ** exponent);
   }
 
-  function classifyIngestResponse(status, body) {
+  function parseRetryAfterMs(value) {
+    const seconds = Number.parseInt(String(value || ''), 10);
+    if (!Number.isFinite(seconds) || seconds <= 0) return 0;
+    return Math.min(seconds, 3600) * 1000;
+  }
+
+  // Server state is derived from the HTTP status only; the error text is
+  // for people, not for classification.
+  function serverStateForResponse(status, body) {
+    if (status === 401 || status === 403) {
+      return body && body.code === 'INGEST_DISABLED'
+        ? 'capture_disabled'
+        : 'unauthorized';
+    }
+    if (status >= 500) return 'server_error';
+    return 'online';
+  }
+
+  function classifyIngestResponse(status, body, retryAfter) {
+    const serverState = serverStateForResponse(status, body);
     if (
       status >= 200 &&
       status < 300 &&
@@ -47,19 +66,30 @@
     ) {
       return {
         action: 'ack',
-        duplicate: body.duplicate === true
+        duplicate: body.duplicate === true,
+        serverState
       };
     }
-    if (BLOCKED_STATUSES.has(status)) {
-      return { action: 'block', duplicate: false };
+    if (status === 429 && body && body.budgetExhausted === true) {
+      return { action: 'pause', duplicate: false, serverState };
     }
-    return { action: 'retry', duplicate: false };
+    if (BLOCKED_STATUSES.has(status)) {
+      return { action: 'block', duplicate: false, serverState };
+    }
+    return {
+      action: 'retry',
+      duplicate: false,
+      serverState,
+      retryAfterMs: status === 429 ? parseRetryAfterMs(retryAfter) : 0
+    };
   }
 
   return {
     DEFAULT_SERVER_URL,
     normalizeServerUrl,
     computeBackoffMs,
+    parseRetryAfterMs,
+    serverStateForResponse,
     classifyIngestResponse
   };
 });

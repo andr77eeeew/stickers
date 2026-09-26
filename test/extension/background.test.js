@@ -5,10 +5,12 @@ const test = require('node:test');
 
 const {
   READY_STORAGE,
+  WEBP_BYTES,
   capturePayload,
   finishedRequest,
   loadBackground,
-  loadDevtools
+  loadDevtools,
+  settle
 } = require('../helpers/extensionHarness');
 
 const INGEST_URL = 'http://127.0.0.1:3001/api/ingest';
@@ -101,7 +103,7 @@ test('keeps one queue entry per content hash while delivery is failing', async (
   assert.equal(record.attempts, 1);
   assert.ok(record.nextAttemptAt > Date.now());
   assert.equal(harness.alarms.has('capture-queue-retry'), true);
-  assert.equal((await harness.status()).serverState, 'offline');
+  assert.equal((await harness.status()).serverState, 'server_error');
 });
 
 test('unreachable server keeps the payload for a later local retry', async () => {
@@ -208,12 +210,10 @@ test('DevTools listener ignores traffic while capture is disabled', async () => 
   assert.equal(harness.messages.some(({ type }) => type === 'QUEUE_CAPTURE'), false);
 });
 
-// Contracts for known defects (docs/extension/PLAN.md §2). They are marked
-// todo until stage E1 fixes them; remove the todo option together with the fix.
+// Regression contracts for defects fixed in stage E1 (docs/extension/PLAN.md §2).
 
 test(
   'B1: heartbeat does not overwrite the last meaningful event',
-  { todo: 'E1: heartbeat must update only lastHeartbeatAt' },
   async () => {
     const harness = await loadBackground();
     await harness.sendAndSettle({ type: 'QUEUE_CAPTURE', payload: capturePayload() });
@@ -226,7 +226,6 @@ test(
 
 test(
   'B2: exhausted capture budget pauses delivery instead of reporting offline',
-  { todo: 'E1: 429 budgetExhausted must pause the queue without retries' },
   async () => {
     const harness = await loadBackground();
     harness.server.onIngest = () => ({
@@ -255,7 +254,6 @@ test(
 
 test(
   'B9: rejected token is reported as unauthorized, not offline',
-  { todo: 'E1: classify auth failures by HTTP status, not by the reason text' },
   async () => {
     const harness = await loadBackground();
     // lib/localSecurity.js always sends an error text with 401.
@@ -272,7 +270,6 @@ test(
 
 test(
   'B3: sticker type is taken from bytes, not the Content-Type header',
-  { todo: 'E1: classify by URL, detect type by magic bytes' },
   async () => {
     const harness = await loadDevtools();
     const awebp = finishedRequest({ mimeType: 'image/awebp' });
@@ -288,3 +285,145 @@ test(
     for (const message of queued) assert.equal(message.payload.mimeType, 'image/webp');
   }
 );
+
+test('B2: delivery resumes after the budget is reset and holds new captures meanwhile', async () => {
+  const harness = await loadBackground();
+  let budgetExhausted = true;
+  harness.server.onIngest = () => budgetExhausted
+    ? { status: 429, body: { error: 'Session budget exhausted.', budgetExhausted: true } }
+    : { status: 200, body: { success: true } };
+  const serverStatus = harness.server.handle;
+  harness.server.handle = (pathname, options) => pathname === '/api/status'
+    ? { status: 200, body: { session: { exhausted: budgetExhausted, captureCount: 25, maxCaptures: 25 } } }
+    : serverStatus(pathname, options);
+
+  await harness.sendAndSettle({ type: 'QUEUE_CAPTURE', payload: capturePayload() });
+  const held = await harness.sendAndSettle({
+    type: 'QUEUE_CAPTURE',
+    payload: capturePayload({
+      contentBase64: Buffer.concat([WEBP_BYTES, Buffer.from([1])]).toString('base64')
+    })
+  });
+  assert.equal(held.paused, true);
+  assert.equal(ingestCalls(harness).length, 1, 'held capture is not sent while paused');
+  assert.equal(harness.badge.text, 'II');
+
+  await harness.fireAlarm('capture-queue-periodic');
+  assert.equal(harness.queue.records.size, 2, 'still exhausted: nothing resumes');
+
+  budgetExhausted = false;
+  await harness.fireAlarm('capture-queue-periodic');
+  const status = await harness.status();
+  assert.equal(harness.queue.records.size, 0);
+  assert.equal(status.pausedReason, null);
+  assert.equal(status.counters.delivered, 2);
+  assert.match(status.events.map(({ text }) => text).join('\n'), /resumed/);
+});
+
+test('plain rate limit honours Retry-After without pausing', async () => {
+  const harness = await loadBackground();
+  harness.server.onIngest = () => ({
+    status: 429,
+    headers: { 'Retry-After': '120' },
+    body: { error: 'Ingest rate limit exceeded. Slow down.' }
+  });
+  const before = Date.now();
+  await harness.sendAndSettle({ type: 'QUEUE_CAPTURE', payload: capturePayload() });
+
+  const record = onlyRecord(harness);
+  assert.equal(record.state, 'pending');
+  assert.ok(record.nextAttemptAt >= before + 120000);
+  assert.equal((await harness.status()).pausedReason, null);
+});
+
+test('server with capture disabled is reported distinctly from a wrong token', async () => {
+  const harness = await loadBackground();
+  harness.server.onIngest = () => ({
+    status: 401,
+    body: { error: 'Extension ingest is disabled until INGEST_TOKEN is configured.', code: 'INGEST_DISABLED' }
+  });
+  await harness.sendAndSettle({ type: 'QUEUE_CAPTURE', payload: capturePayload() });
+  const status = await harness.status();
+  assert.equal(status.serverState, 'capture_disabled');
+  assert.match(status.lastEvent, /disabled on the local server/);
+});
+
+test('B8: held items can be listed, saved as a file and discarded', async () => {
+  const harness = await loadBackground();
+  harness.server.onIngest = () => ({ status: 422, body: { error: 'bad body' } });
+  await harness.sendAndSettle({ type: 'QUEUE_CAPTURE', payload: capturePayload() });
+
+  const { items } = await harness.send({ type: 'LIST_HELD' });
+  assert.equal(items.length, 1);
+  assert.equal(items[0].state, 'blocked');
+  assert.equal(items[0].mimeType, 'image/webp');
+  assert.equal('payload' in items[0], false, 'listing carries no bytes');
+
+  const file = await harness.send({ type: 'GET_ITEM_FILE', id: items[0].id });
+  assert.equal(file.ok, true);
+  assert.equal(file.contentBase64, WEBP_BYTES.toString('base64'));
+
+  const discarded = await harness.sendAndSettle({ type: 'DISCARD_ITEM', id: items[0].id });
+  assert.equal(discarded.ok, true);
+  assert.equal(harness.queue.records.size, 0);
+  assert.equal(harness.badge.text, '');
+});
+
+test('B8: pending items cannot be discarded or read through the held API', async () => {
+  const harness = await loadBackground();
+  harness.server.onIngest = () => ({ status: 503, body: {} });
+  await harness.sendAndSettle({ type: 'QUEUE_CAPTURE', payload: capturePayload() });
+  const { id } = onlyRecord(harness);
+
+  assert.equal((await harness.send({ type: 'DISCARD_ITEM', id })).ok, false);
+  assert.equal((await harness.send({ type: 'GET_ITEM_FILE', id })).ok, false);
+  assert.equal(harness.queue.records.size, 1);
+});
+
+test('B4: listener state reflects capture toggle and the inspected site', async () => {
+  const harness = await loadBackground();
+  assert.equal((await harness.status()).listenerState, 'closed');
+
+  await harness.sendAndSettle({ type: 'DEVTOOLS_HEARTBEAT', tabId: 7, site: 'other' });
+  assert.equal((await harness.status()).listenerState, 'other_site');
+
+  await harness.sendAndSettle({ type: 'DEVTOOLS_HEARTBEAT', tabId: 9, site: 'tiktok' });
+  assert.equal((await harness.status()).listenerState, 'watching');
+
+  harness.chrome.storage.local.set({ captureEnabled: false });
+  await settle();
+  assert.equal((await harness.status()).listenerState, 'off');
+});
+
+test('B4: DevTools on another site reads no bodies until it navigates to TikTok', async () => {
+  const harness = await loadDevtools({
+    resources: [{ type: 'document', url: 'https://example.com/' }]
+  });
+  const listening = harness.messages.find(({ kind }) => kind === 'listening');
+  assert.equal(listening.site, 'other');
+
+  const ignored = finishedRequest();
+  await harness.finish(ignored);
+  assert.equal(ignored.getContentCalls, 0);
+
+  await harness.navigate('https://www.tiktok.com/messages');
+  const changed = harness.messages.filter(({ kind }) => kind === 'site_changed');
+  assert.equal(changed.at(-1).site, 'tiktok');
+
+  const sticker = finishedRequest();
+  await harness.finish(sticker);
+  assert.equal(sticker.getContentCalls, 1);
+});
+
+test('B4: disabled capture sends no heartbeat until it is enabled', async () => {
+  const harness = await loadDevtools({ storage: { captureEnabled: false } });
+  await harness.tickIntervals();
+  assert.equal(harness.messages.some(({ type }) => type === 'DEVTOOLS_HEARTBEAT'), false);
+  assert.equal(harness.messages.some(({ kind }) => kind === 'listening'), false);
+
+  harness.chrome.storage.local.set({ captureEnabled: true });
+  await settle();
+  await harness.tickIntervals();
+  const heartbeat = harness.messages.find(({ type }) => type === 'DEVTOOLS_HEARTBEAT');
+  assert.deepEqual({ tabId: heartbeat.tabId, site: heartbeat.site }, { tabId: 7, site: 'tiktok' });
+});

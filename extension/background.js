@@ -8,19 +8,33 @@ importScripts(
 const MAX_QUEUE_ITEMS = 500;
 const DELIVERY_BATCH_SIZE = 20;
 const DELIVERY_TIMEOUT_MS = 12000;
-const BLOCKED_RETRY_AT = Number.MAX_SAFE_INTEGER;
 const PERIODIC_ALARM = 'capture-queue-periodic';
 const RETRY_ALARM = 'capture-queue-retry';
 const STATUS_KEY = 'captureRuntimeStatus';
+const LISTENER_STALE_MS = 25000;
+const MAX_EVENTS = 20;
+const HELD_LIST_LIMIT = 50;
+const BUDGET_PAUSE_REASON = 'capture_budget_exhausted';
+const LISTENER_SITES = ['tiktok', 'other', 'unknown'];
+
+const BADGE_COLORS = Object.freeze({
+  off: '#5D6B80',
+  problem: '#B42318',
+  paused: '#9A5B00',
+  queued: '#5133D4'
+});
 
 const DEFAULT_STATUS = Object.freeze({
-  version: 1,
-  lastHeartbeatAt: null,
+  version: 2,
+  listeners: {},
   serverState: 'unknown',
+  pausedReason: null,
+  session: null,
   lastDeliveryAt: null,
   lastAcceptedAt: null,
   lastError: null,
   lastEvent: 'Extension initialized',
+  events: [],
   counters: {
     observed: 0,
     queued: 0,
@@ -111,6 +125,8 @@ async function readStatus() {
   return {
     ...DEFAULT_STATUS,
     ...status,
+    listeners: { ...(status.listeners || {}) },
+    events: Array.isArray(status.events) ? status.events : [],
     counters: {
       ...DEFAULT_STATUS.counters,
       ...(status.counters || {})
@@ -118,7 +134,9 @@ async function readStatus() {
   };
 }
 
-function patchStatus(patch, counterDelta) {
+// event: { tone: 'ok' | 'info' | 'warning' | 'problem', text }. Only events
+// change lastEvent; heartbeats and pings never overwrite it.
+function patchStatus(patch, counterDelta, event) {
   const task = statusChain.then(async () => {
     const current = await readStatus();
     const counters = { ...current.counters };
@@ -127,9 +145,16 @@ function patchStatus(patch, counterDelta) {
     }
     const next = {
       ...current,
-      ...patch,
+      ...(typeof patch === 'function' ? patch(current) : patch),
       counters
     };
+    if (event) {
+      next.lastEvent = event.text;
+      next.events = [
+        { at: Date.now(), tone: event.tone, text: event.text },
+        ...current.events
+      ].slice(0, MAX_EVENTS);
+    }
     await storageSet({ [STATUS_KEY]: next });
     return next;
   });
@@ -151,22 +176,27 @@ async function sha256Hex(bytes) {
 }
 
 async function updateBadge() {
-  const settings = await getSettings();
-  const queue = await CaptureQueueStore.summary();
+  const [settings, queue, status] = await Promise.all([
+    getSettings(),
+    CaptureQueueStore.summary(),
+    readStatus()
+  ]);
+  let text = '';
+  let color = BADGE_COLORS.queued;
   if (!settings.captureEnabled) {
-    await chrome.action.setBadgeText({ text: 'OFF' });
-    await chrome.action.setBadgeBackgroundColor({ color: '#64748b' });
-    return;
+    text = 'OFF';
+    color = BADGE_COLORS.off;
+  } else if (queue.blocked > 0) {
+    text = '!';
+    color = BADGE_COLORS.problem;
+  } else if (queue.paused > 0 || status.pausedReason) {
+    text = 'II';
+    color = BADGE_COLORS.paused;
+  } else if (queue.count > 0) {
+    text = queue.count > 99 ? '99+' : String(queue.count);
   }
-  if (queue.blocked > 0) {
-    await chrome.action.setBadgeText({ text: '!' });
-    await chrome.action.setBadgeBackgroundColor({ color: '#f43f5e' });
-    return;
-  }
-  const text =
-    queue.count === 0 ? '' : queue.count > 99 ? '99+' : String(queue.count);
   await chrome.action.setBadgeText({ text });
-  await chrome.action.setBadgeBackgroundColor({ color: '#8b5cf6' });
+  await chrome.action.setBadgeBackgroundColor({ color });
 }
 
 async function enqueueCapture(rawPayload) {
@@ -174,11 +204,9 @@ async function enqueueCapture(rawPayload) {
   const validation = CapturePayload.validateCapturePayload(rawPayload, policy);
   if (!validation.ok) {
     await patchStatus(
-      {
-        lastEvent: `Rejected: ${validation.reason}`,
-        lastError: validation.reason
-      },
-      { observed: 1, skipped: 1 }
+      { lastError: validation.reason },
+      { observed: 1, skipped: 1 },
+      { tone: 'warning', text: `Rejected: ${validation.reason}` }
     );
     return { ok: false, reason: validation.reason };
   }
@@ -186,38 +214,32 @@ async function enqueueCapture(rawPayload) {
   const id = await sha256Hex(validation.bytes);
   const existing = await CaptureQueueStore.get(id);
   if (existing) {
-    await patchStatus(
-      {
-        lastEvent: 'Already queued',
-        lastError: null
-      },
-      { observed: 1 }
-    );
+    await patchStatus({}, { observed: 1 });
     return { ok: true, queued: false, duplicateQueued: true, id };
   }
 
   if ((await CaptureQueueStore.count()) >= MAX_QUEUE_ITEMS) {
     await patchStatus(
-      {
-        lastEvent: 'Queue full',
-        lastError: 'queue_full'
-      },
-      { observed: 1, skipped: 1 }
+      { lastError: 'queue_full' },
+      { observed: 1, skipped: 1 },
+      { tone: 'problem', text: 'Queue full: capture skipped' }
     );
     await updateBadge();
     return { ok: false, reason: 'queue_full' };
   }
 
+  const status = await readStatus();
+  const paused = Boolean(status.pausedReason);
   const now = Date.now();
   try {
     await CaptureQueueStore.add({
       id,
       payload: validation.payload,
-      state: 'pending',
+      state: paused ? 'paused' : 'pending',
       attempts: 0,
       createdAt: now,
-      nextAttemptAt: now,
-      lastError: null
+      nextAttemptAt: paused ? CaptureQueueStore.HELD_UNTIL : now,
+      lastError: paused ? status.pausedReason : null
     });
   } catch (error) {
     if (error && error.name === 'ConstraintError') {
@@ -227,15 +249,15 @@ async function enqueueCapture(rawPayload) {
   }
 
   await patchStatus(
-    {
-      lastEvent: 'Queued local capture',
-      lastError: null
-    },
-    { observed: 1, queued: 1 }
+    {},
+    { observed: 1, queued: 1 },
+    paused
+      ? { tone: 'warning', text: 'Captured and held: delivery is paused' }
+      : { tone: 'info', text: 'Captured, delivering to the local server' }
   );
   await updateBadge();
-  void processQueue();
-  return { ok: true, queued: true, id };
+  if (!paused) void processQueue();
+  return { ok: true, queued: true, paused, id };
 }
 
 function queueCapture(payload) {
@@ -284,10 +306,13 @@ async function deliverRecord(record) {
     const body = await response.json().catch(() => ({}));
     const result = DeliveryPolicy.classifyIngestResponse(
       response.status,
-      body
+      body,
+      response.headers.get('Retry-After')
     );
     return {
       ...result,
+      httpStatus: response.status,
+      session: body && body.session ? body.session : null,
       reason:
         result.action === 'ack'
           ? null
@@ -297,6 +322,7 @@ async function deliverRecord(record) {
     return {
       action: 'retry',
       duplicate: false,
+      serverState: 'offline',
       reason:
         error && error.name === 'AbortError'
           ? 'local_server_timeout'
@@ -305,26 +331,59 @@ async function deliverRecord(record) {
   }
 }
 
+function describeFailure(result) {
+  if (result.serverState === 'unauthorized') return 'Token rejected by the local server';
+  if (result.serverState === 'capture_disabled') return 'Live capture is disabled on the local server';
+  if (result.serverState === 'offline') return 'Local server unreachable';
+  return result.reason;
+}
+
+// Returns false when the rest of the batch should wait.
 async function handleDeliveryResult(record, result) {
   const now = Date.now();
+  const sessionPatch = result.session ? { session: result.session } : {};
+
   if (result.action === 'ack') {
     await CaptureQueueStore.remove(record.id);
     await patchStatus(
       {
-        serverState: 'online',
+        ...sessionPatch,
+        serverState: result.serverState,
         lastDeliveryAt: new Date(now).toISOString(),
         lastAcceptedAt: new Date(now).toISOString(),
-        lastError: null,
-        lastEvent: result.duplicate
-          ? 'Server acknowledged duplicate'
-          : 'Server accepted sticker'
+        lastError: null
       },
+      { delivered: 1, duplicates: result.duplicate ? 1 : 0 },
+      result.duplicate
+        ? { tone: 'ok', text: 'Already in library' }
+        : { tone: 'ok', text: 'Server accepted sticker' }
+    );
+    return true;
+  }
+
+  if (result.action === 'pause') {
+    await CaptureQueueStore.put({
+      ...record,
+      state: 'paused',
+      attempts: record.attempts + 1,
+      nextAttemptAt: CaptureQueueStore.HELD_UNTIL,
+      lastError: BUDGET_PAUSE_REASON
+    });
+    await CaptureQueueStore.pausePending(BUDGET_PAUSE_REASON);
+    await patchStatus(
       {
-        delivered: 1,
-        duplicates: result.duplicate ? 1 : 0
+        ...sessionPatch,
+        serverState: result.serverState,
+        pausedReason: BUDGET_PAUSE_REASON,
+        lastError: BUDGET_PAUSE_REASON
+      },
+      undefined,
+      {
+        tone: 'warning',
+        text: 'Delivery paused: capture budget exhausted. Captures are kept; reset the budget in the dashboard.'
       }
     );
-    return;
+    return false;
   }
 
   const attempts = record.attempts + 1;
@@ -334,22 +393,26 @@ async function handleDeliveryResult(record, result) {
     state: blocked ? 'blocked' : 'pending',
     attempts,
     nextAttemptAt: blocked
-      ? BLOCKED_RETRY_AT
-      : now + DeliveryPolicy.computeBackoffMs(attempts),
+      ? CaptureQueueStore.HELD_UNTIL
+      : now +
+        Math.max(
+          DeliveryPolicy.computeBackoffMs(attempts),
+          Number(result.retryAfterMs) || 0
+        ),
     lastError: result.reason
   });
-  await patchStatus({
-    serverState:
-      result.reason === 'missing_ingest_token'
-        ? 'configuration_required'
-        : /^HTTP (401|403)$/.test(result.reason)
-          ? 'unauthorized'
-          : 'offline',
-    lastError: result.reason,
-    lastEvent: blocked
-      ? `Delivery blocked: ${result.reason}`
-      : `Delivery retry scheduled: ${result.reason}`
-  });
+  const failure = describeFailure(result);
+  await patchStatus(
+    {
+      serverState: result.serverState,
+      lastError: result.reason
+    },
+    undefined,
+    blocked
+      ? { tone: 'problem', text: `Delivery blocked: ${failure}` }
+      : { tone: 'warning', text: `Delivery retry scheduled: ${failure}` }
+  );
+  return true;
 }
 
 async function scheduleNextDelivery() {
@@ -368,37 +431,41 @@ function processQueue() {
   if (deliveryPromise) return deliveryPromise;
   deliveryPromise = (async () => {
     let processed = 0;
-    while (processed < DELIVERY_BATCH_SIZE) {
+    let keepGoing = true;
+    while (keepGoing && processed < DELIVERY_BATCH_SIZE) {
       const records = await CaptureQueueStore.getDue(
         Date.now(),
         DELIVERY_BATCH_SIZE - processed
       );
       if (records.length === 0) break;
 
-      let waitingForConfiguration = false;
       for (const record of records) {
         const result = await deliverRecord(record);
         if (result.action === 'wait') {
-          await patchStatus({
-            serverState: 'configuration_required',
-            lastError: result.reason,
-            lastEvent: `Delivery waiting: ${result.reason}`
-          });
-          waitingForConfiguration = true;
+          await patchStatus(
+            {
+              serverState: 'configuration_required',
+              lastError: result.reason
+            },
+            undefined,
+            { tone: 'warning', text: `Delivery waiting: ${result.reason}` }
+          );
+          keepGoing = false;
           break;
         }
-        await handleDeliveryResult(record, result);
+        keepGoing = await handleDeliveryResult(record, result);
         processed += 1;
+        if (!keepGoing) break;
       }
-      if (waitingForConfiguration) break;
     }
     return scheduleNextDelivery();
   })()
     .catch((error) => {
-      void patchStatus({
-        lastError: safeReason(error && error.message),
-        lastEvent: 'Queue processing failed'
-      }).catch(() => undefined);
+      void patchStatus(
+        { lastError: safeReason(error && error.message) },
+        undefined,
+        { tone: 'problem', text: 'Queue processing failed' }
+      ).catch(() => undefined);
       return null;
     })
     .finally(() => {
@@ -407,31 +474,57 @@ function processQueue() {
   return deliveryPromise;
 }
 
+function computeListenerState(settings, status, now) {
+  if (!settings.captureEnabled) return 'off';
+  const live = Object.values(status.listeners).filter(
+    (listener) => now - Number(listener.at) < LISTENER_STALE_MS
+  );
+  if (live.length === 0) return 'closed';
+  if (live.some((listener) => listener.site === 'tiktok')) return 'watching';
+  if (live.some((listener) => listener.site === 'unknown')) {
+    return 'watching_unconfirmed';
+  }
+  return 'other_site';
+}
+
 async function getPublicStatus() {
   const [settings, status, queue] = await Promise.all([
     getSettings(),
     readStatus(),
     CaptureQueueStore.summary()
   ]);
-  const listenerAlive =
-    Number(status.lastHeartbeatAt) > Date.now() - 25000;
   return {
     captureMode: 'devtools-network-body',
     captureEnabled: settings.captureEnabled,
     serverUrl:
       settings.serverUrl || DeliveryPolicy.DEFAULT_SERVER_URL,
     hasToken: Boolean(settings.ingestToken),
-    listenerState: listenerAlive ? 'listening' : 'closed',
+    listenerState: computeListenerState(settings, status, Date.now()),
     serverState: status.serverState,
+    pausedReason: status.pausedReason,
+    session: status.session,
     queue,
     lastDeliveryAt: status.lastDeliveryAt,
     lastAcceptedAt: status.lastAcceptedAt,
     lastError: status.lastError,
     lastEvent: status.lastEvent,
+    events: status.events,
     counters: status.counters
   };
 }
 
+async function resumeDelivery(text) {
+  await CaptureQueueStore.releasePaused(Date.now());
+  await patchStatus(
+    { pausedReason: null, lastError: null },
+    undefined,
+    { tone: 'ok', text }
+  );
+  await processQueue();
+}
+
+// Checks the local server; while delivery is paused by the capture budget,
+// resumes it once the server reports the budget as available again.
 async function pingServer() {
   const settings = await getSettings();
   if (!settings.serverUrl || !settings.ingestToken) {
@@ -443,6 +536,7 @@ async function pingServer() {
     });
     return getPublicStatus();
   }
+  let body = null;
   try {
     const response = await fetchWithTimeout(
       `${settings.serverUrl}/api/status`,
@@ -453,38 +547,106 @@ async function pingServer() {
         }
       }
     );
-    await patchStatus({
-      serverState: response.ok
-        ? 'online'
-        : response.status === 401 || response.status === 403
-          ? 'unauthorized'
-          : 'offline',
-      lastError: response.ok ? null : `HTTP ${response.status}`
-    });
+    body = await response.json().catch(() => ({}));
+    await patchStatus((current) => ({
+      serverState: DeliveryPolicy.serverStateForResponse(response.status, body),
+      session: response.ok && body.session ? body.session : current.session,
+      lastError: response.ok
+        ? current.pausedReason
+        : safeReason(body.error || `HTTP ${response.status}`)
+    }));
+    if (!response.ok) body = null;
   } catch {
     await patchStatus({
       serverState: 'offline',
       lastError: 'local_server_unreachable'
     });
   }
+
+  const status = await readStatus();
+  if (
+    status.pausedReason === BUDGET_PAUSE_REASON &&
+    body &&
+    body.session &&
+    body.session.exhausted === false
+  ) {
+    await resumeDelivery('Capture budget available again; delivery resumed');
+  }
   return getPublicStatus();
 }
 
+async function recordHeartbeat(message) {
+  const key = String(message.tabId ?? 'default');
+  const site = LISTENER_SITES.includes(message.site) ? message.site : 'unknown';
+  const now = Date.now();
+  await patchStatus((current) => {
+    const listeners = {};
+    for (const [tabId, listener] of Object.entries(current.listeners)) {
+      if (now - Number(listener.at) < LISTENER_STALE_MS) listeners[tabId] = listener;
+    }
+    listeners[key] = { site, at: now };
+    return { listeners };
+  });
+}
+
+const SITE_EVENTS = Object.freeze({
+  tiktok: 'DevTools open on a TikTok tab',
+  other: 'DevTools open on another site: capture idle',
+  unknown: 'DevTools open: site not confirmed yet'
+});
+
 async function recordDevtoolsEvent(message) {
-  const kind = ['listening', 'skipped', 'body_read_failed'].includes(
+  const kind = ['listening', 'site_changed', 'skipped', 'body_read_failed'].includes(
     message.kind
   )
     ? message.kind
     : 'unknown';
+  if (kind === 'listening' || kind === 'site_changed') {
+    await recordHeartbeat(message);
+    const site = LISTENER_SITES.includes(message.site) ? message.site : 'unknown';
+    await patchStatus({}, undefined, {
+      tone: site === 'tiktok' ? 'ok' : 'info',
+      text: SITE_EVENTS[site]
+    });
+    return;
+  }
   const reason = safeReason(message.reason || kind);
-  const patch = {
-    lastEvent:
-      kind === 'listening'
-        ? 'DevTools listener active'
-        : `${kind}: ${reason}`
+  await patchStatus(
+    { lastError: reason },
+    kind === 'skipped' ? { skipped: 1 } : undefined,
+    { tone: 'warning', text: `${kind === 'skipped' ? 'Skipped' : 'Body read failed'}: ${reason}` }
+  );
+}
+
+async function discardHeldItem(id) {
+  const record = typeof id === 'string' ? await CaptureQueueStore.get(id) : null;
+  if (!record || !['blocked', 'paused'].includes(record.state)) {
+    return { ok: false, reason: 'item_not_held' };
+  }
+  await CaptureQueueStore.remove(id);
+  await patchStatus({}, undefined, { tone: 'info', text: 'Held capture discarded' });
+  await updateBadge();
+  return { ok: true };
+}
+
+async function getHeldItemFile(id) {
+  const record = typeof id === 'string' ? await CaptureQueueStore.get(id) : null;
+  if (!record || !['blocked', 'paused'].includes(record.state)) {
+    return { ok: false, reason: 'item_not_held' };
+  }
+  return {
+    ok: true,
+    id: record.id,
+    mimeType: record.payload.mimeType,
+    contentBase64: record.payload.contentBase64
   };
-  if (kind !== 'listening') patch.lastError = reason;
-  await patchStatus(patch, kind === 'skipped' ? { skipped: 1 } : undefined);
+}
+
+async function releaseAllHeld() {
+  await CaptureQueueStore.releaseHeld(Date.now());
+  await patchStatus({ pausedReason: null });
+  await processQueue();
+  return getPublicStatus();
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -498,18 +660,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   } else if (message.type === 'PING_SERVER') {
     operation = pingServer();
   } else if (message.type === 'RETRY_QUEUE') {
-    operation = CaptureQueueStore.releaseBlocked(Date.now())
-      .then(() => processQueue())
-      .then(() => getPublicStatus());
+    operation = releaseAllHeld();
   } else if (message.type === 'SETTINGS_UPDATED') {
     operation = CaptureQueueStore.releaseBlocked(Date.now())
       .then(() => processQueue())
       .then(() => getPublicStatus());
+  } else if (message.type === 'LIST_HELD') {
+    operation = CaptureQueueStore.listHeld(HELD_LIST_LIMIT).then((items) => ({ items }));
+  } else if (message.type === 'DISCARD_ITEM') {
+    operation = discardHeldItem(message.id);
+  } else if (message.type === 'GET_ITEM_FILE') {
+    operation = getHeldItemFile(message.id);
   } else if (message.type === 'DEVTOOLS_HEARTBEAT') {
-    operation = patchStatus({
-      lastHeartbeatAt: Date.now(),
-      lastEvent: 'DevTools listener active'
-    }).then(() => ({ ok: true }));
+    operation = recordHeartbeat(message).then(() => ({ ok: true }));
   } else if (message.type === 'DEVTOOLS_EVENT') {
     operation = recordDevtoolsEvent(message).then(() => ({ ok: true }));
   } else {
@@ -528,8 +691,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if ([PERIODIC_ALARM, RETRY_ALARM].includes(alarm.name)) {
+  if (alarm.name === RETRY_ALARM) {
     void processQueue();
+  } else if (alarm.name === PERIODIC_ALARM) {
+    void processQueue().then(async () => {
+      const [status, queue] = await Promise.all([
+        readStatus(),
+        CaptureQueueStore.summary()
+      ]);
+      if (status.pausedReason || queue.paused > 0) await pingServer();
+    });
   }
 });
 

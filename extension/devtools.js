@@ -1,7 +1,12 @@
 'use strict';
 
+const HEARTBEAT_MS = 10000;
+
 let captureEnabled = false;
 let captureChain = Promise.resolve();
+// 'tiktok' | 'other' | 'unknown': site of the inspected tab, learned only
+// from DevTools metadata (resources and navigation), never from page code.
+let inspectedSite = 'unknown';
 
 function sendRuntimeMessage(message) {
   return new Promise((resolve, reject) => {
@@ -47,16 +52,71 @@ function getResponseMimeType(response) {
   return header && header.value ? header.value : '';
 }
 
+function classifySite(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return 'unknown';
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (
+    parsed.protocol === 'https:' &&
+    (host === 'tiktok.com' || host.endsWith('.tiktok.com'))
+  ) {
+    return 'tiktok';
+  }
+  return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+    ? 'other'
+    : 'unknown';
+}
+
+function detectInitialSite() {
+  return new Promise((resolve) => {
+    const inspected = chrome.devtools.inspectedWindow;
+    if (!inspected || typeof inspected.getResources !== 'function') {
+      resolve('unknown');
+      return;
+    }
+    inspected.getResources((resources) => {
+      const documents = (resources || []).filter(
+        (resource) => resource && resource.type === 'document'
+      );
+      const sites = documents.map((resource) => classifySite(resource.url));
+      if (sites.includes('tiktok')) resolve('tiktok');
+      else if (sites.includes('other')) resolve('other');
+      else resolve('unknown');
+    });
+  });
+}
+
+function listenerInfo() {
+  const inspected = chrome.devtools.inspectedWindow;
+  return {
+    tabId: inspected ? inspected.tabId : undefined,
+    site: inspectedSite
+  };
+}
+
 function reportEvent(kind, reason) {
   return sendRuntimeMessage({
     type: 'DEVTOOLS_EVENT',
     kind,
-    reason
+    reason,
+    ...listenerInfo()
+  }).catch(() => undefined);
+}
+
+function sendHeartbeat() {
+  if (!captureEnabled) return Promise.resolve();
+  return sendRuntimeMessage({
+    type: 'DEVTOOLS_HEARTBEAT',
+    ...listenerInfo()
   }).catch(() => undefined);
 }
 
 async function handleFinishedRequest(request, policy) {
-  if (!captureEnabled) return;
+  if (!captureEnabled || inspectedSite === 'other') return;
 
   const requestUrl =
     request && request.request && typeof request.request.url === 'string'
@@ -102,6 +162,15 @@ async function handleFinishedRequest(request, policy) {
     return;
   }
 
+  // The header is only a hint; the bytes decide the sticker type.
+  const detectedMimeType = CapturePayload.detectBase64ImageMime(
+    encoded.contentBase64
+  );
+  if (!policy.allowedMimeTypes.includes(detectedMimeType)) {
+    await reportEvent('skipped', 'content_type_mismatch');
+    return;
+  }
+
   let result;
   try {
     result = await sendRuntimeMessage({
@@ -109,7 +178,7 @@ async function handleFinishedRequest(request, policy) {
       payload: {
         source: 'devtools',
         sourceUrl: resource.sourceUrl,
-        mimeType: resource.mimeType,
+        mimeType: detectedMimeType,
         observedAt: new Date().toISOString(),
         contentBase64: encoded.contentBase64
       }
@@ -140,18 +209,24 @@ async function startCapture() {
       .catch(() => reportEvent('body_read_failed', 'capture_pipeline_failed'));
   });
 
-  await reportEvent('listening', 'network_listener_ready');
-  await sendRuntimeMessage({ type: 'DEVTOOLS_HEARTBEAT' });
-  setInterval(() => {
-    void sendRuntimeMessage({ type: 'DEVTOOLS_HEARTBEAT' }).catch(
-      () => undefined
-    );
-  }, 10000);
+  if (chrome.devtools.network.onNavigated) {
+    chrome.devtools.network.onNavigated.addListener((url) => {
+      const site = classifySite(url);
+      if (site === inspectedSite) return;
+      inspectedSite = site;
+      if (captureEnabled) void reportEvent('site_changed');
+    });
+  }
+
+  inspectedSite = await detectInitialSite();
+  if (captureEnabled) await reportEvent('listening');
+  setInterval(() => void sendHeartbeat(), HEARTBEAT_MS);
 }
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName === 'local' && changes.captureEnabled) {
     captureEnabled = changes.captureEnabled.newValue !== false;
+    if (captureEnabled) void reportEvent('listening');
   }
 });
 

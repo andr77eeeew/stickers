@@ -7,9 +7,11 @@ const elements = {
   queueState: document.getElementById('queueState'),
   deliveredCount: document.getElementById('deliveredCount'),
   lastEvent: document.getElementById('lastEvent'),
-  lastError: document.getElementById('lastError'),
+  events: document.getElementById('events'),
   retryQueue: document.getElementById('retryQueue')
 };
+const TONE_CLASS = Object.freeze({ ok: 'ok', pending: 'warn', problem: 'bad' });
+const EVENTS_SHOWN = 6;
 
 function sendMessage(message) {
   return new Promise((resolve, reject) => {
@@ -29,49 +31,37 @@ function setState(element, text, className) {
   element.className = className || '';
 }
 
+function setDescribed(element, description) {
+  setState(element, description.text, TONE_CLASS[description.tone]);
+}
+
+function renderEvents(events) {
+  const items = (events || []).slice(1, EVENTS_SHOWN).map((event) => {
+    const item = document.createElement('li');
+    item.className = event.tone === 'problem' ? 'bad' : event.tone === 'warning' ? 'warn' : '';
+    const time = document.createElement('time');
+    time.dateTime = new Date(event.at).toISOString();
+    time.textContent = new Date(event.at).toLocaleTimeString();
+    item.append(time, ` ${event.text}`);
+    return item;
+  });
+  elements.events.replaceChildren(...items);
+}
+
 function render(status) {
   elements.captureEnabled.checked = status.captureEnabled !== false;
-  setState(
-    elements.listenerState,
-    status.listenerState === 'listening' ? 'Listening' : 'DevTools closed',
-    status.listenerState === 'listening' ? 'ok' : 'warn'
-  );
-
-  const serverLabels = {
-    online: 'Online',
-    offline: 'Offline',
-    unauthorized: 'Token rejected',
-    configuration_required: 'Token required',
-    unknown: 'Not checked'
-  };
-  setState(
-    elements.serverState,
-    serverLabels[status.serverState] || status.serverState,
-    status.serverState === 'online'
-      ? 'ok'
-      : status.serverState === 'unknown'
-        ? 'warn'
-        : 'bad'
-  );
-
-  const queue = status.queue || {};
-  const blocked = Number(queue.blocked) || 0;
-  setState(
+  setDescribed(elements.listenerState, StatusText.describeListener(status.listenerState));
+  setDescribed(elements.serverState, StatusText.describeServer(status.serverState));
+  setDescribed(
     elements.queueState,
-    blocked
-      ? `${queue.count || 0} (${blocked} blocked)`
-      : String(queue.count || 0),
-    blocked ? 'bad' : queue.count ? 'warn' : 'ok'
+    StatusText.describeQueue(status.queue, status.pausedReason)
   );
   elements.deliveredCount.textContent = String(
     status.counters && status.counters.delivered || 0
   );
   elements.lastEvent.textContent =
     status.lastEvent || 'No capture events yet.';
-  elements.lastError.hidden = !status.lastError;
-  elements.lastError.textContent = status.lastError
-    ? `Issue: ${status.lastError}`
-    : '';
+  renderEvents(status.events);
 }
 
 async function refresh() {

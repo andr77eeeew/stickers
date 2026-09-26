@@ -172,6 +172,8 @@ const wss = new WebSocket.Server({ noServer: true });
 let lastIngestAt = null;
 let lastIngestSource = null;
 let lastIngestError = null;
+// A payload refused by the sticker policy is not a delivery failure.
+let lastIngestRejection = null;
 let capturedStickers = [];
 const dbPath = path.join(OUTPUT_DIR, 'stickers_db.json');
 const database = new StickerDatabase(dbPath);
@@ -270,7 +272,9 @@ function getStatusPayload() {
       requiresDevToolsOpen: true,
       lastAcceptedAt: lastIngestAt,
       lastIngestAt,
-      lastError: lastIngestError
+      lastError: lastIngestError,
+      lastRejectedAt: lastIngestRejection ? lastIngestRejection.at : null,
+      lastRejectedReason: lastIngestRejection ? lastIngestRejection.reason : null
     },
     session: sessionBudget.snapshot(),
     lastIngestAt,
@@ -677,9 +681,8 @@ app.post('/api/ingest', security.requireExtension, async (req, res) => {
       session: sessionBudget.snapshot()
     });
   } catch (error) {
-    lastIngestError = error.message;
-    emitStatus();
     if (error.code === 'SESSION_EXHAUSTED') {
+      emitStatus();
       res.setHeader('Retry-After', '60');
       return res.status(429).json({
         error: error.message,
@@ -699,7 +702,13 @@ app.post('/api/ingest', security.requireExtension, async (req, res) => {
     const status = clientCodes.has(error.code) || /contentBase64|body|MIME|URL|image|pixel/i.test(error.message)
       ? 400
       : 500;
-    return res.status(status).json({ error: error.message });
+    if (status === 400) {
+      lastIngestRejection = { at: new Date().toISOString(), reason: error.message };
+    } else {
+      lastIngestError = error.message;
+    }
+    emitStatus();
+    return res.status(status).json({ error: error.message, code: error.code || null });
   }
 });
 
@@ -708,6 +717,7 @@ app.use('/api', security.requireDashboard);
 app.post('/api/session/reset', (_req, res) => {
   sessionBudget.reset();
   lastIngestError = null;
+  lastIngestRejection = null;
   emitStatus();
   res.json({ success: true, session: sessionBudget.snapshot() });
 });
@@ -1990,6 +2000,9 @@ function startServer(port = PORT) {
     console.log(' Capture mode: DevTools response bodies only (no CDP, DOM automation, or CDN refetch)');
     console.log(` Session budget: ${SESSION_MAX_CAPTURES} captures / ${Math.round(SESSION_MAX_MS / 60000)} min`);
     console.log(` Extension ingest: ${INGEST_TOKEN ? 'Bearer token required' : 'DISABLED (set INGEST_TOKEN)'}`);
+    if (INGEST_TOKEN && listeningPort !== 3001) {
+      console.warn(` Warning: the capture extension only delivers to port 3001; it cannot reach port ${listeningPort}.`);
+    }
     console.log('=======================================================');
   });
   return server;

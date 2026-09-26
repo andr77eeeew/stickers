@@ -76,6 +76,11 @@
       ),
       rejectedPathMarkers: Object.freeze(
         asLowercaseStringArray(raw.rejectedPathMarkers, 'rejectedPathMarkers')
+      ),
+      contentTypeHints: Object.freeze(
+        raw.contentTypeHints === undefined
+          ? []
+          : asLowercaseStringArray(raw.contentTypeHints, 'contentTypeHints')
       )
     });
   }
@@ -91,7 +96,9 @@
   function normalizeMimeType(value) {
     if (typeof value !== 'string') return '';
     const normalized = value.split(';', 1)[0].trim().toLowerCase();
-    return normalized === 'image/jpg' ? 'image/jpeg' : normalized;
+    if (normalized === 'image/jpg') return 'image/jpeg';
+    if (normalized === 'image/awebp') return 'image/webp';
+    return normalized;
   }
 
   function matchesAllowedHost(hostname, policy) {
@@ -111,7 +118,8 @@
     });
   }
 
-  function classifyStickerResource(sourceUrl, mimeType, policy) {
+  // URL-only part of the policy: host, path markers and extension.
+  function classifyStickerUrl(sourceUrl, policy) {
     let parsed;
     try {
       parsed = new URL(sourceUrl);
@@ -152,16 +160,28 @@
       return { allowed: false, reason: 'path_not_sticker_specific' };
     }
 
-    const normalizedMimeType = normalizeMimeType(mimeType);
-    if (!policy.allowedMimeTypes.includes(normalizedMimeType)) {
-      return { allowed: false, reason: 'mime_not_allowed' };
-    }
-
     return {
       allowed: true,
-      mimeType: normalizedMimeType,
       sourceUrl: `${parsed.origin}${parsed.pathname}`
     };
+  }
+
+  // The Content-Type header is only a hint: CDNs also answer with
+  // octet-stream or no type at all. An allowed image type is kept as the
+  // expected type; a generic hint leaves it empty until bytes are checked.
+  function classifyStickerResource(sourceUrl, mimeType, policy) {
+    const url = classifyStickerUrl(sourceUrl, policy);
+    if (!url.allowed) return url;
+
+    const normalizedMimeType = normalizeMimeType(mimeType);
+    if (policy.allowedMimeTypes.includes(normalizedMimeType)) {
+      return { ...url, mimeType: normalizedMimeType };
+    }
+    const hints = policy.contentTypeHints || [];
+    if (!normalizedMimeType || hints.includes(normalizedMimeType)) {
+      return { ...url, mimeType: '' };
+    }
+    return { allowed: false, reason: 'mime_not_allowed' };
   }
 
   return {
@@ -169,6 +189,7 @@
     loadPolicy,
     normalizeMimeType,
     matchesAllowedHost,
+    classifyStickerUrl,
     classifyStickerResource
   };
 });

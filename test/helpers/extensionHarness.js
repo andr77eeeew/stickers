@@ -26,29 +26,45 @@ async function settle(rounds = 60) {
   }
 }
 
+// Mirrors the public API of extension/shared/queueStore.js without IndexedDB.
 function createMemoryQueueStore() {
   const records = new Map();
   const clone = (value) => structuredClone(value);
+  const HELD_STATES = ['blocked', 'paused'];
+  const HELD_UNTIL = Number.MAX_SAFE_INTEGER;
 
   function summarize() {
     let count = 0;
     let blocked = 0;
+    let paused = 0;
     let earliestNextAttemptAt = null;
     for (const record of records.values()) {
       count += 1;
       if (record.state === 'blocked') blocked += 1;
+      if (record.state === 'paused') paused += 1;
       if (
-        record.state !== 'blocked' &&
+        !HELD_STATES.includes(record.state) &&
         (earliestNextAttemptAt === null ||
           record.nextAttemptAt < earliestNextAttemptAt)
       ) {
         earliestNextAttemptAt = record.nextAttemptAt;
       }
     }
-    return { count, blocked, earliestNextAttemptAt };
+    return { count, blocked, paused, earliestNextAttemptAt };
+  }
+
+  function release(states, now) {
+    for (const record of records.values()) {
+      if (states.includes(record.state)) {
+        record.state = 'pending';
+        record.nextAttemptAt = now;
+        record.lastError = null;
+      }
+    }
   }
 
   return {
+    HELD_UNTIL,
     records,
     async get(id) {
       return records.has(id) ? clone(records.get(id)) : undefined;
@@ -72,7 +88,7 @@ function createMemoryQueueStore() {
     },
     async getDue(now, limit) {
       return [...records.values()]
-        .filter((record) => record.nextAttemptAt <= now)
+        .filter((record) => record.nextAttemptAt <= now && !HELD_STATES.includes(record.state))
         .sort((left, right) => left.nextAttemptAt - right.nextAttemptAt)
         .slice(0, limit)
         .map(clone);
@@ -81,18 +97,46 @@ function createMemoryQueueStore() {
       return summarize();
     },
     async releaseBlocked(now) {
+      release(['blocked'], now);
+    },
+    async releaseHeld(now) {
+      release(HELD_STATES, now);
+    },
+    async releasePaused(now) {
+      release(['paused'], now);
+    },
+    async pausePending(reason) {
       for (const record of records.values()) {
-        if (record.state === 'blocked') {
-          record.state = 'pending';
-          record.nextAttemptAt = now;
-          record.lastError = null;
+        if (record.state === 'pending') {
+          record.state = 'paused';
+          record.nextAttemptAt = HELD_UNTIL;
+          record.lastError = reason;
         }
       }
+    },
+    async listHeld(limit) {
+      return [...records.values()]
+        .filter((record) => HELD_STATES.includes(record.state))
+        .slice(0, limit)
+        .map((record) => ({
+          id: record.id,
+          state: record.state,
+          attempts: record.attempts,
+          createdAt: record.createdAt,
+          lastError: record.lastError,
+          mimeType: record.payload && record.payload.mimeType,
+          base64Length: record.payload ? record.payload.contentBase64.length : 0
+        }));
     }
   };
 }
 
-function createChrome({ storage = {} } = {}) {
+const TIKTOK_DOCUMENT = Object.freeze({
+  type: 'document',
+  url: 'https://www.tiktok.com/messages?lang=en'
+});
+
+function createChrome({ storage = {}, resources = [TIKTOK_DOCUMENT] } = {}) {
   const store = structuredClone(storage);
   const listeners = {
     storage: [],
@@ -171,7 +215,12 @@ function createChrome({ storage = {} } = {}) {
           panels.push({ title, icon, page });
         }
       },
-      inspectedWindow: { tabId: 7 }
+      inspectedWindow: {
+        tabId: 7,
+        getResources(callback) {
+          queueMicrotask(() => callback(resources.map((resource) => ({ ...resource }))));
+        }
+      }
     }
   };
 
@@ -233,14 +282,15 @@ function defaultServer() {
   return server;
 }
 
-function createContext(chrome, fetch) {
+// Intervals never fire on their own; tests run them with tickIntervals().
+function createContext(chrome, fetch, intervals) {
   return vm.createContext({
     chrome,
     fetch,
     console,
     setTimeout,
     clearTimeout,
-    setInterval: () => 1,
+    setInterval: (callback) => intervals.push(callback),
     clearInterval: () => undefined,
     AbortController,
     URL,
@@ -272,7 +322,8 @@ async function loadBackground({ storage = READY_STORAGE } = {}) {
   const server = defaultServer();
   const network = createFetch({ server });
   const queue = createMemoryQueueStore();
-  const context = createContext(env.chrome, network.fetch);
+  const intervals = [];
+  const context = createContext(env.chrome, network.fetch, intervals);
   context.importScripts = (...files) => {
     for (const file of files) {
       if (file === 'shared/queueStore.js') {
@@ -319,8 +370,11 @@ async function loadBackground({ storage = READY_STORAGE } = {}) {
   };
 }
 
-async function loadDevtools({ storage = { captureEnabled: true } } = {}) {
-  const env = createChrome({ storage });
+async function loadDevtools({
+  storage = { captureEnabled: true },
+  resources = [TIKTOK_DOCUMENT]
+} = {}) {
+  const env = createChrome({ storage, resources });
   const server = defaultServer();
   const network = createFetch({ server });
   const messages = [];
@@ -330,7 +384,8 @@ async function loadDevtools({ storage = { captureEnabled: true } } = {}) {
       callback({ ok: true, queued: message.type === 'QUEUE_CAPTURE' })
     );
   };
-  const context = createContext(env.chrome, network.fetch);
+  const intervals = [];
+  const context = createContext(env.chrome, network.fetch, intervals);
   for (const file of ['shared/stickerPolicy.js', 'shared/capturePayload.js', 'devtools.js']) {
     runFile(context, file);
   }
@@ -341,7 +396,17 @@ async function loadDevtools({ storage = { captureEnabled: true } } = {}) {
     await settle();
   }
 
-  return { ...env, context, network, messages, finish };
+  async function navigate(url) {
+    for (const listener of env.listeners.navigated) listener(url);
+    await settle();
+  }
+
+  async function tickIntervals() {
+    for (const callback of intervals) callback();
+    await settle();
+  }
+
+  return { ...env, context, network, messages, finish, navigate, tickIntervals };
 }
 
 function finishedRequest({

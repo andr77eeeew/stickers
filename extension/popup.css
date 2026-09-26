@@ -175,3 +175,40 @@ input:focus-visible {
 .tips strong {
   color: #e2e8f0;
 }
+
+h2 {
+  margin: 0 0 4px;
+  font-size: 13px;
+}
+
+.hint {
+  margin-bottom: 8px;
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.held-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.held-list li {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  border-top: 1px solid #27324c;
+  font-size: 11px;
+}
+
+.held-list li span {
+  overflow-wrap: anywhere;
+}
+
+.held-list button {
+  width: auto;
+  padding: 6px 8px;
+}

@@ -41,15 +41,17 @@
     <section class="activity">
       <h2>Last activity</h2>
       <p id="lastEvent">No capture events yet.</p>
-      <p id="lastError" class="error" hidden></p>
-      <button id="retryQueue" type="button">Retry blocked items now</button>
+      <ol id="events" class="events"></ol>
+      <button id="retryQueue" type="button">Retry held items now</button>
     </section>
 
     <aside>
-      Open DevTools before the sticker response loads. Keep this DevTools
-      window open; do not automate clicks, scrolling, or chat actions.
+      Keep DevTools open on the TikTok tab before stickers load; this panel
+      does not need to be selected. Scroll at a normal pace, do not reload the
+      chat to capture again and do not turn on Disable cache.
     </aside>
   </main>
+  <script src="shared/statusText.js"></script>
   <script src="panel.js"></script>
 </body>
 </html>

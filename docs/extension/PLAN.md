@@ -56,7 +56,7 @@ Popup и панель — тёмная тема со свечением (`#090d1
 
 ## 3. Порядок работ
 
-### Этап E0. Страховочные тесты (0.5–1 день)
+### Этап E0. Страховочные тесты (0.5–1 день) — выполнен, [E0.md](E0.md)
 
 1. Тест-инварианты manifest: permissions ⊆ {`storage`, `alarms`}, host permissions только loopback, нет `content_scripts`, `web_accessible_resources`, `externally_connectable`, `debugger`, `tabs`, `webRequest`, `scripting`.
 2. Статический тест кода расширения: `fetch` только к нормализованному loopback URL и к собственным `chrome.runtime.getURL` ресурсам; нет `chrome.devtools.inspectedWindow.eval`, `reload`, `chrome.scripting`.
@@ -64,7 +64,7 @@ Popup и панель — тёмная тема со свечением (`#090d1
 
 **Готово, когда:** инварианты безопасности проверяются в `npm test`, а поведение очереди воспроизводимо без браузера.
 
-### Этап E1. Исправление ошибок (1–2 дня)
+### Этап E1. Исправление ошибок (1–2 дня) — выполнен, [E1.md](E1.md)
 
 1. B1: heartbeat обновляет только `lastHeartbeatAt`; журнал событий — отдельный кольцевой буфер последних 20 событий.
 2. B2: отдельное действие `pause` для 429 с `budgetExhausted` → состояние `Paused: capture budget`; элементы держатся в очереди без повторов до сброса бюджета; `Retry-After` учитывается для обычного 429.

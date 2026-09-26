@@ -28,6 +28,15 @@
     <p id="lastEvent" class="event">No activity yet.</p>
   </section>
 
+  <section class="card" id="heldSection" hidden>
+    <h2>Held captures</h2>
+    <p class="hint">
+      Bytes that the local server did not accept. Retry them, save the file
+      for manual import, or discard it.
+    </p>
+    <ul id="heldList" class="held-list"></ul>
+  </section>
+
   <section class="card">
     <label class="toggle-row">
       <span>Capture enabled</span>
@@ -60,18 +69,19 @@
     </div>
     <button id="saveSettings" type="button">Save and reconnect</button>
     <button id="retryQueue" type="button" class="secondary full">
-      Retry blocked items
+      Retry held items
     </button>
     <p id="message" class="message" hidden></p>
   </section>
 
   <section class="tips">
     <p>1. Set the same token as <code>INGEST_TOKEN</code> on the server.</p>
-    <p>2. Open TikTok Messages, then open Chrome DevTools.</p>
-    <p>3. Select the <strong>Sticker Capture</strong> DevTools panel.</p>
-    <p>4. Only responses loaded after DevTools opens can be captured.</p>
+    <p>2. Turn on <strong>Capture enabled</strong>.</p>
+    <p>3. Open Chrome DevTools on the TikTok Messages tab and keep it open.</p>
+    <p>4. Only stickers loaded after DevTools opens can be captured. Do not reload the chat to capture again.</p>
   </section>
 
+  <script src="shared/statusText.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

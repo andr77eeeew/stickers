@@ -1,11 +1,15 @@
 {
   "version": 1,
-  "maxBodyBytes": 12582912,
+  "maxBodyBytes": 4194304,
   "allowedMimeTypes": [
     "image/webp",
     "image/jpeg",
     "image/png",
     "image/gif"
+  ],
+  "contentTypeHints": [
+    "application/octet-stream",
+    "binary/octet-stream"
   ],
   "allowedHosts": {
     "exact": [
