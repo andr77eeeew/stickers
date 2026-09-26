@@ -1,6 +1,7 @@
 importScripts(
   'shared/stickerPolicy.js',
   'shared/capturePayload.js',
+  'shared/capturePipeline.js',
   'shared/deliveryPolicy.js',
   'shared/queueStore.js'
 );
@@ -18,6 +19,18 @@ const BUDGET_PAUSE_REASON = 'capture_budget_exhausted';
 const LISTENER_SITES = ['tiktok', 'other', 'unknown'];
 const SERVER_HEARTBEAT_MS = 20000;
 const SERVER_HEARTBEAT_MIN_GAP_MS = 2000;
+// Session feed and diagnostics live in chrome.storage.session: in memory,
+// gone when the browser closes.
+const FEED_KEY = 'captureFeed';
+const FEED_LIMIT = 60;
+const DIAGNOSTICS_KEY = 'captureDiagnostics';
+const DIAGNOSTIC_EXAMPLES = 3;
+// Hashes the server already acknowledged, so a sticker seen again is not
+// sent again. Reset whenever the server URL or token changes.
+const KNOWN_KEY = 'knownCaptures';
+const KNOWN_LIMIT = 2000;
+const CAPTURE_ORIGINS = ['live', 'network_log'];
+const STICKER_ID_PATTERN = /^[a-f0-9]{64}$/;
 
 const BADGE_COLORS = Object.freeze({
   off: '#5D6B80',
@@ -152,6 +165,121 @@ function patchStatus(patch, counterDelta, event) {
   return task;
 }
 
+const memorySession = {};
+
+function sessionGet(defaults) {
+  if (!chrome.storage.session) {
+    const result = {};
+    for (const [key, fallback] of Object.entries(defaults)) {
+      result[key] = key in memorySession ? memorySession[key] : fallback;
+    }
+    return Promise.resolve(result);
+  }
+  return new Promise((resolve) => chrome.storage.session.get(defaults, resolve));
+}
+
+function sessionSet(values) {
+  if (!chrome.storage.session) {
+    Object.assign(memorySession, values);
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => chrome.storage.session.set(values, resolve));
+}
+
+let feedChain = Promise.resolve();
+
+function chainFeed(task) {
+  const next = feedChain.then(task);
+  feedChain = next.catch(() => undefined);
+  return next;
+}
+
+// touch: move the entry to the top (a new observation); otherwise update in place.
+function upsertFeed(entry, { touch = false } = {}) {
+  return chainFeed(async () => {
+    const stored = await sessionGet({ [FEED_KEY]: [] });
+    const feed = Array.isArray(stored[FEED_KEY]) ? stored[FEED_KEY] : [];
+    const index = feed.findIndex((item) => item.id === entry.id);
+    if (index >= 0) {
+      const merged = {
+        ...feed[index],
+        ...entry,
+        thumbnail: entry.thumbnail || feed[index].thumbnail || null
+      };
+      if (touch) {
+        feed.splice(index, 1);
+        feed.unshift(merged);
+      } else {
+        feed[index] = merged;
+      }
+    } else {
+      feed.unshift({ at: Date.now(), thumbnail: null, reason: null, stickerId: null, ...entry });
+    }
+    await sessionSet({ [FEED_KEY]: feed.slice(0, FEED_LIMIT) });
+  });
+}
+
+function recordDiagnostic(message) {
+  const reason = /^[a-z_]{1,40}$/.test(String(message.reason || ''))
+    ? message.reason
+    : 'unknown';
+  const pattern = String(message.pattern || '').slice(0, 200);
+  return chainFeed(async () => {
+    const stored = await sessionGet({ [DIAGNOSTICS_KEY]: {} });
+    const diagnostics = stored[DIAGNOSTICS_KEY] || {};
+    const current = diagnostics[reason] || { count: 0, examples: [], lastAt: null };
+    diagnostics[reason] = {
+      count: current.count + 1,
+      examples: [pattern, ...current.examples.filter((item) => item !== pattern)]
+        .filter(Boolean)
+        .slice(0, DIAGNOSTIC_EXAMPLES),
+      lastAt: Date.now()
+    };
+    await sessionSet({ [DIAGNOSTICS_KEY]: diagnostics });
+  });
+}
+
+async function knownServerKey() {
+  const settings = await getSettings();
+  const digest = await sha256Hex(new TextEncoder().encode(settings.ingestToken));
+  return `${settings.serverUrl}|${digest.slice(0, 16)}`;
+}
+
+async function lookupKnown(id) {
+  const [stored, serverKey] = await Promise.all([
+    storageGet({ [KNOWN_KEY]: null }),
+    knownServerKey()
+  ]);
+  const known = stored[KNOWN_KEY];
+  if (!known || known.serverKey !== serverKey || !Array.isArray(known.entries)) return null;
+  const entry = known.entries.find(([hash]) => hash === id);
+  return entry ? entry[1] : null;
+}
+
+async function rememberKnown(id, stickerId) {
+  if (!STICKER_ID_PATTERN.test(String(stickerId || ''))) return;
+  const [stored, serverKey] = await Promise.all([
+    storageGet({ [KNOWN_KEY]: null }),
+    knownServerKey()
+  ]);
+  const known = stored[KNOWN_KEY];
+  const entries = known && known.serverKey === serverKey && Array.isArray(known.entries)
+    ? known.entries.filter(([hash]) => hash !== id)
+    : [];
+  entries.push([id, stickerId]);
+  await storageSet({
+    [KNOWN_KEY]: { serverKey, entries: entries.slice(-KNOWN_LIMIT) }
+  });
+}
+
+function sanitizeThumbnail(value) {
+  return typeof value === 'string' &&
+    /^data:image\/(webp|png|jpeg);base64,/.test(value) &&
+    value.length <= CapturePipeline.THUMBNAIL_MAX_LENGTH
+    ? value
+    : null;
+}
+
 function safeReason(value) {
   return String(value || 'unknown_error')
     .replace(/https?:\/\/\S+/gi, '[url]')
@@ -189,7 +317,9 @@ async function updateBadge() {
   await chrome.action.setBadgeBackgroundColor({ color });
 }
 
-async function enqueueCapture(rawPayload) {
+async function enqueueCapture(rawPayload, meta) {
+  const origin = CAPTURE_ORIGINS.includes(meta.origin) ? meta.origin : 'live';
+  const thumbnail = sanitizeThumbnail(meta.thumbnail);
   const policy = await getPolicy();
   const validation = CapturePayload.validateCapturePayload(rawPayload, policy);
   if (!validation.ok) {
@@ -198,13 +328,40 @@ async function enqueueCapture(rawPayload) {
       { observed: 1, skipped: 1 },
       { tone: 'warning', text: `Rejected: ${validation.reason}` }
     );
+    await upsertFeed({
+      id: `rejected-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+      origin,
+      state: 'rejected',
+      reason: validation.reason,
+      thumbnail
+    });
     return { ok: false, reason: validation.reason };
   }
 
   const id = await sha256Hex(validation.bytes);
+  const feedEntry = {
+    id,
+    origin,
+    thumbnail,
+    at: Date.now(),
+    mimeType: validation.payload.mimeType,
+    byteLength: validation.bytes.length
+  };
+
+  const knownStickerId = await lookupKnown(id);
+  if (knownStickerId) {
+    await patchStatus({}, { observed: 1 });
+    await upsertFeed(
+      { ...feedEntry, state: 'duplicate', stickerId: knownStickerId, reason: null },
+      { touch: true }
+    );
+    return { ok: true, queued: false, known: true, stickerId: knownStickerId, id };
+  }
+
   const existing = await CaptureQueueStore.get(id);
   if (existing) {
     await patchStatus({}, { observed: 1 });
+    await upsertFeed({ ...feedEntry, state: 'queued' }, { touch: true });
     return { ok: true, queued: false, duplicateQueued: true, id };
   }
 
@@ -214,6 +371,7 @@ async function enqueueCapture(rawPayload) {
       { observed: 1, skipped: 1 },
       { tone: 'problem', text: 'Queue full: capture skipped' }
     );
+    await upsertFeed({ ...feedEntry, state: 'rejected', reason: 'queue_full' }, { touch: true });
     await updateBadge();
     return { ok: false, reason: 'queue_full' };
   }
@@ -238,6 +396,10 @@ async function enqueueCapture(rawPayload) {
     throw error;
   }
 
+  await upsertFeed(
+    { ...feedEntry, state: 'queued', reason: paused ? status.pausedReason : null },
+    { touch: true }
+  );
   await patchStatus(
     {},
     { observed: 1, queued: 1 },
@@ -250,8 +412,8 @@ async function enqueueCapture(rawPayload) {
   return { ok: true, queued: true, paused, id };
 }
 
-function queueCapture(payload) {
-  const task = enqueueChain.then(() => enqueueCapture(payload));
+function queueCapture(payload, meta) {
+  const task = enqueueChain.then(() => enqueueCapture(payload, meta || {}));
   enqueueChain = task.catch(() => undefined);
   return task;
 }
@@ -299,9 +461,11 @@ async function deliverRecord(record) {
       body,
       response.headers.get('Retry-After')
     );
+    const stickerId = body && body.sticker && body.sticker.id;
     return {
       ...result,
       httpStatus: response.status,
+      stickerId: STICKER_ID_PATTERN.test(String(stickerId || '')) ? stickerId : null,
       session: body && body.session ? body.session : null,
       reason:
         result.action === 'ack'
@@ -335,6 +499,13 @@ async function handleDeliveryResult(record, result) {
 
   if (result.action === 'ack') {
     await CaptureQueueStore.remove(record.id);
+    await rememberKnown(record.id, result.stickerId);
+    await upsertFeed({
+      id: record.id,
+      state: result.duplicate ? 'duplicate' : 'new',
+      stickerId: result.stickerId,
+      reason: null
+    });
     await patchStatus(
       {
         ...sessionPatch,
@@ -360,6 +531,7 @@ async function handleDeliveryResult(record, result) {
       lastError: BUDGET_PAUSE_REASON
     });
     await CaptureQueueStore.pausePending(BUDGET_PAUSE_REASON);
+    await upsertFeed({ id: record.id, state: 'queued', reason: BUDGET_PAUSE_REASON });
     await patchStatus(
       {
         ...sessionPatch,
@@ -392,6 +564,7 @@ async function handleDeliveryResult(record, result) {
     lastError: result.reason
   });
   const failure = describeFailure(result);
+  await upsertFeed({ id: record.id, state: 'queued', reason: failure });
   await patchStatus(
     {
       serverState: result.serverState,
@@ -670,12 +843,36 @@ async function recordDevtoolsEvent(message) {
   );
 }
 
+// Feed entries still in the queue report the queue's current state.
+async function getFeed() {
+  const [stored, settings] = await Promise.all([
+    sessionGet({ [FEED_KEY]: [], [DIAGNOSTICS_KEY]: {} }),
+    getSettings()
+  ]);
+  const items = await Promise.all((stored[FEED_KEY] || []).map(async (item) => {
+    if (item.state !== 'queued') return item;
+    const record = await CaptureQueueStore.get(item.id);
+    if (!record || !['blocked', 'paused'].includes(record.state)) return item;
+    return { ...item, state: 'held', reason: record.lastError || item.reason };
+  }));
+  return {
+    items,
+    diagnostics: stored[DIAGNOSTICS_KEY] || {},
+    serverUrl: settings.serverUrl || DeliveryPolicy.DEFAULT_SERVER_URL
+  };
+}
+
+function clearFeed() {
+  return chainFeed(() => sessionSet({ [FEED_KEY]: [], [DIAGNOSTICS_KEY]: {} }));
+}
+
 async function discardHeldItem(id) {
   const record = typeof id === 'string' ? await CaptureQueueStore.get(id) : null;
   if (!record || !['blocked', 'paused'].includes(record.state)) {
     return { ok: false, reason: 'item_not_held' };
   }
   await CaptureQueueStore.remove(id);
+  await upsertFeed({ id, state: 'discarded', reason: null });
   await patchStatus({}, undefined, { tone: 'info', text: 'Held capture discarded' });
   await updateBadge();
   return { ok: true };
@@ -706,7 +903,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   let operation;
   if (message.type === 'QUEUE_CAPTURE') {
-    operation = queueCapture(message.payload);
+    operation = queueCapture(message.payload, {
+      origin: message.origin,
+      thumbnail: message.thumbnail
+    });
   } else if (message.type === 'GET_STATUS') {
     operation = getPublicStatus();
   } else if (message.type === 'PING_SERVER') {
@@ -733,6 +933,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       void sendServerHeartbeat(['listening', 'site_changed'].includes(message.kind));
       return { ok: true };
     });
+  } else if (message.type === 'GET_FEED') {
+    operation = getFeed();
+  } else if (message.type === 'CLEAR_FEED') {
+    operation = clearFeed().then(() => ({ ok: true }));
+  } else if (message.type === 'CAPTURE_DIAGNOSTIC') {
+    operation = recordDiagnostic(message).then(() => ({ ok: true }));
   } else if (message.type === 'DEVTOOLS_CLOSED') {
     operation = forgetListener(message).then(() => {
       void sendServerHeartbeat(true);
@@ -775,6 +981,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   ) {
     void updateBadge();
     if (changes.serverUrl || changes.ingestToken) {
+      void storageSet({ [KNOWN_KEY]: null });
       void CaptureQueueStore.releaseBlocked(Date.now()).then(() =>
         processQueue()
       );

@@ -82,7 +82,7 @@ Popup и панель — тёмная тема со свечением (`#090d1
 2. **Heartbeat в сервер**: пока слушатель активен, background раз в 20 с отправляет `POST /api/extension/heartbeat` (Bearer, только loopback) с состоянием `watching|off|other_site` и размером очереди. Dashboard показывает `Extension · Watching TikTok · 5 s ago`; без свежего heartbeat — прежнее честное `Awaiting DevTools`.
 3. **Единый словарь статусов** для popup, панели и popover dashboard, описанный в SPEC расширения.
 
-### Этап E3. Полезные функции (3–4 дня)
+### Этап E3. Полезные функции (3–4 дня) — выполнен, [E3.md](E3.md)
 
 1. **Лента сессии в DevTools-панели**: миниатюры пойманных стикеров (из тех же байтов, `blob:` URL), состояние каждого — `New`, `Already in library`, `Queued`, `Rejected: <причина>`; ссылка `Open in library` (`http://127.0.0.1:3001/?id=…`). Сервер уже возвращает `duplicate` и `sticker`.
 2. **«Забрать из журнала Network»**: кнопка в панели вызывает `chrome.devtools.network.getHAR()` и прогоняет уже записанные с момента открытия DevTools ответы через ту же политику. Ноль сетевых запросов, спасает случай «забыл включить захват» без перезагрузки чата.

@@ -23,6 +23,7 @@ import {
 } from './lib/stickerModel';
 import { describeFinishedJob, getQueuedStickerIds } from './lib/jobModel';
 import { PACK_LIMITS, getMembership, getPackKind, stickerKind } from './lib/packModel';
+import { betterVariant, indexVariants } from './lib/variantModel';
 
 // One-click batch conversions above this size ask for confirmation first.
 const LARGE_BATCH_CONFIRM = 10;
@@ -86,6 +87,7 @@ export default function App() {
   const attention = useMemo(() => summarizeAttention(stickers), [stickers]);
   const attentionSamples = useMemo(() => stickers.filter(needsAction).slice(0, 5), [stickers]);
   const stickersById = useMemo(() => new Map(stickers.map((sticker) => [sticker.id, sticker])), [stickers]);
+  const variantIndex = useMemo(() => indexVariants(stickers), [stickers]);
   const queuedIds = useMemo(() => getQueuedStickerIds(jobs), [jobs]);
   // Only stickers the server can convert now: original present, not already busy.
   const isConvertible = useCallback((sticker) => Boolean(sticker)
@@ -317,6 +319,7 @@ export default function App() {
           <PacksView
             packState={packState}
             stickersById={stickersById}
+            variantIndex={variantIndex}
             selectedPackId={viewState.pack}
             onSelectPack={(packId) => updateView({ pack: packId }, { push: true })}
             packActions={packActions}
@@ -411,6 +414,11 @@ export default function App() {
               selectedStartTimes={selectedStartTimes}
               setSelectedStartTimes={setSelectedStartTimes}
               copyText={actions.copyText}
+              variant={selectedSticker ? {
+                entry: variantIndex.get(selectedSticker.id) || null,
+                better: betterVariant(selectedSticker, variantIndex, stickersById),
+                onOpen: (id) => updateView({ view: 'library', id }, { push: true })
+              } : null}
               packSection={packState.loaded ? {
                 activePack,
                 packs: packState.packs,

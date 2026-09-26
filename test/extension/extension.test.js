@@ -239,10 +239,9 @@ test('manifest has no TikTok access or automation permissions', () => {
 });
 
 test('DevTools capture reads response content and never calls fetch', () => {
-  const source = fs.readFileSync(
-    path.join(extensionRoot, 'devtools.js'),
-    'utf8'
-  );
+  const source = ['devtools.js', 'shared/capturePipeline.js']
+    .map((file) => fs.readFileSync(path.join(extensionRoot, file), 'utf8'))
+    .join('\n');
   assert.match(source, /\.getContent\(/);
   assert.doesNotMatch(source, /\bfetch\s*\(/);
   assert.doesNotMatch(source, /MutationObserver|document\.body|querySelector/);
@@ -290,6 +289,7 @@ test('mock DevTools API queues only an already-loaded response body', async () =
   vm.runInNewContext(source, {
     chrome,
     CapturePayload,
+    CapturePipeline: require(path.join(extensionRoot, 'shared', 'capturePipeline.js')),
     StickerPolicy: {
       ...StickerPolicy,
       loadPolicy: async () => policy

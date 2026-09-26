@@ -155,3 +155,112 @@ aside {
 .events time {
   font-variant-numeric: tabular-nums;
 }
+
+.session {
+  margin-top: 16px;
+  padding: 20px;
+  border: 1px solid #26314c;
+  border-radius: 12px;
+  background: #10182d;
+}
+
+.section-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.section-actions {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.section-actions button.secondary {
+  border: 1px solid #3b4764;
+  background: #1a2440;
+}
+
+.hint {
+  margin-top: 4px;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.feed {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.feed-item {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid #26314c;
+  border-radius: 8px;
+}
+
+.feed-thumb {
+  flex: none;
+  width: 56px;
+  height: 56px;
+  border-radius: 6px;
+  background: #1a2440;
+  object-fit: contain;
+}
+
+.feed-placeholder {
+  display: grid;
+  place-items: center;
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.feed-body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.feed-body strong {
+  overflow-wrap: anywhere;
+}
+
+.feed-meta {
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+
+.feed-body a {
+  color: #c4b5fd;
+}
+
+.diagnostics {
+  margin-top: 14px;
+  font-size: 12px;
+}
+
+.diagnostics summary {
+  cursor: pointer;
+  color: #cbd5e1;
+}
+
+.diagnostics ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  line-height: 1.6;
+}
+
+.diagnostics code {
+  color: #94a3b8;
+  overflow-wrap: anywhere;
+}

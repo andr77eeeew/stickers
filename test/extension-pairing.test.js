@@ -174,3 +174,65 @@ test('dashboard pairing enables capture, heartbeats reach the dashboard, unpair 
     await sandbox.stop();
   }
 });
+
+test('live captures are auto-converted in one job unless the setting is off', { timeout: 90_000 }, async () => {
+  // The window must outlast the server's pacing gap between captures (≤ 1.4 s).
+  process.env.AUTO_CONVERT_DELAY_MS = '3000';
+  const sharp = require('sharp');
+  const sandbox = await startSandboxServer('stickers-autoconvert-test-');
+  try {
+    const { body: paired } = await sandbox.request('/api/extension/pair', { method: 'POST' });
+    const ingest = async (index) => {
+      const webp = await sharp({
+        create: { width: 64, height: 64, channels: 4, background: { r: index * 40, g: 90, b: 160, alpha: 1 } }
+      }).webp().toBuffer();
+      const response = await fetch(`${sandbox.origin}/api/ingest`, {
+        method: 'POST',
+        headers: {
+          Origin: EXTENSION_ORIGIN,
+          Authorization: `Bearer ${paired.token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          source: 'devtools',
+          sourceUrl: `https://p16-tiktok-dm-sticker-sign-sg.ibyteimg.com/obj/video2sticker/${index}.webp`,
+          mimeType: 'image/webp',
+          contentBase64: webp.toString('base64'),
+          observedAt: new Date().toISOString()
+        })
+      });
+      assert.equal(response.status, 200);
+      return (await response.json()).sticker.id;
+    };
+    const waitForJobs = async (count) => {
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        const { body } = await sandbox.request('/api/jobs');
+        if (body.jobs.length >= count) return body.jobs;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      return (await sandbox.request('/api/jobs')).body.jobs;
+    };
+
+    assert.equal((await sandbox.request('/api/status')).body.devtools.autoConvert, true, 'on by default');
+    const first = await ingest(1);
+    const second = await ingest(2);
+    const jobs = await waitForJobs(1);
+    assert.equal(jobs.length, 1, 'captures close together share one job');
+    assert.equal(jobs[0].label, 'Convert 2 captured stickers');
+    assert.deepEqual(jobs[0].items.map((item) => item.stickerId).sort(), [first, second].sort());
+
+    const invalid = await sandbox.request('/api/extension/settings', { method: 'POST', body: { autoConvert: 'yes' } });
+    assert.equal(invalid.status, 400);
+    const off = await sandbox.request('/api/extension/settings', { method: 'POST', body: { autoConvert: false } });
+    assert.equal(off.body.settings.autoConvert, false);
+    await ingest(3);
+    await new Promise((resolve) => setTimeout(resolve, 4000));
+    assert.equal((await sandbox.request('/api/jobs')).body.jobs.length, 1, 'no job while auto-convert is off');
+
+    await sandbox.restart();
+    assert.equal((await sandbox.request('/api/status')).body.devtools.autoConvert, false, 'setting survives a restart');
+  } finally {
+    delete process.env.AUTO_CONVERT_DELAY_MS;
+    await sandbox.stop();
+  }
+});

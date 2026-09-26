@@ -21,75 +21,6 @@ function sendRuntimeMessage(message) {
   });
 }
 
-function getRequestContent(request) {
-  return new Promise((resolve, reject) => {
-    request.getContent((content, encoding) => {
-      const error = chrome.runtime.lastError;
-      if (error) {
-        reject(new Error(error.message));
-        return;
-      }
-      resolve({ content, encoding });
-    });
-  });
-}
-
-function getResponseMimeType(response) {
-  const direct =
-    response &&
-    response.content &&
-    typeof response.content.mimeType === 'string'
-      ? response.content.mimeType
-      : '';
-  if (direct) return direct;
-
-  const header = (response && response.headers || []).find(
-    (entry) =>
-      entry &&
-      typeof entry.name === 'string' &&
-      entry.name.toLowerCase() === 'content-type'
-  );
-  return header && header.value ? header.value : '';
-}
-
-function classifySite(url) {
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return 'unknown';
-  }
-  const host = parsed.hostname.toLowerCase();
-  if (
-    parsed.protocol === 'https:' &&
-    (host === 'tiktok.com' || host.endsWith('.tiktok.com'))
-  ) {
-    return 'tiktok';
-  }
-  return parsed.protocol === 'http:' || parsed.protocol === 'https:'
-    ? 'other'
-    : 'unknown';
-}
-
-function detectInitialSite() {
-  return new Promise((resolve) => {
-    const inspected = chrome.devtools.inspectedWindow;
-    if (!inspected || typeof inspected.getResources !== 'function') {
-      resolve('unknown');
-      return;
-    }
-    inspected.getResources((resources) => {
-      const documents = (resources || []).filter(
-        (resource) => resource && resource.type === 'document'
-      );
-      const sites = documents.map((resource) => classifySite(resource.url));
-      if (sites.includes('tiktok')) resolve('tiktok');
-      else if (sites.includes('other')) resolve('other');
-      else resolve('unknown');
-    });
-  });
-}
-
 function listenerInfo() {
   const inspected = chrome.devtools.inspectedWindow;
   return {
@@ -115,84 +46,6 @@ function sendHeartbeat() {
   }).catch(() => undefined);
 }
 
-async function handleFinishedRequest(request, policy) {
-  if (!captureEnabled || inspectedSite === 'other') return;
-
-  const requestUrl =
-    request && request.request && typeof request.request.url === 'string'
-      ? request.request.url
-      : '';
-  const response = request && request.response;
-  const status = Number(response && response.status);
-  if (Number.isFinite(status) && (status < 200 || status >= 400)) return;
-
-  const resource = StickerPolicy.classifyStickerResource(
-    requestUrl,
-    getResponseMimeType(response),
-    policy
-  );
-  if (!resource.allowed) return;
-
-  const reportedSize = Number(
-    response && response.content && response.content.size
-  );
-  if (
-    Number.isFinite(reportedSize) &&
-    reportedSize > policy.maxBodyBytes
-  ) {
-    await reportEvent('skipped', 'body_too_large');
-    return;
-  }
-
-  let body;
-  try {
-    body = await getRequestContent(request);
-  } catch {
-    await reportEvent('body_read_failed', 'get_content_failed');
-    return;
-  }
-
-  const encoded = CapturePayload.contentToBase64(
-    body.content,
-    body.encoding,
-    policy.maxBodyBytes
-  );
-  if (!encoded.ok) {
-    await reportEvent('skipped', encoded.reason);
-    return;
-  }
-
-  // The header is only a hint; the bytes decide the sticker type.
-  const detectedMimeType = CapturePayload.detectBase64ImageMime(
-    encoded.contentBase64
-  );
-  if (!policy.allowedMimeTypes.includes(detectedMimeType)) {
-    await reportEvent('skipped', 'content_type_mismatch');
-    return;
-  }
-
-  let result;
-  try {
-    result = await sendRuntimeMessage({
-      type: 'QUEUE_CAPTURE',
-      payload: {
-        source: 'devtools',
-        sourceUrl: resource.sourceUrl,
-        mimeType: detectedMimeType,
-        observedAt: new Date().toISOString(),
-        contentBase64: encoded.contentBase64
-      }
-    });
-  } catch {
-    await reportEvent('body_read_failed', 'background_unavailable');
-    return;
-  }
-
-  if (!result.ok) {
-    await reportEvent('skipped', result.reason || 'queue_rejected');
-  }
-}
-
 async function startCapture() {
   const settings = await new Promise((resolve) => {
     chrome.storage.local.get({ captureEnabled: false }, resolve);
@@ -202,23 +55,34 @@ async function startCapture() {
   const policy = await StickerPolicy.loadPolicy(
     chrome.runtime.getURL('shared/sticker-policy.json')
   );
+  const pipeline = CapturePipeline.createPipeline({
+    policy,
+    origin: 'live',
+    send: (message) => sendRuntimeMessage(
+      message.type === 'DEVTOOLS_EVENT' ? { ...message, ...listenerInfo() } : message
+    ),
+    lastError: () => chrome.runtime.lastError
+  });
 
   chrome.devtools.network.onRequestFinished.addListener((request) => {
+    if (!captureEnabled || inspectedSite === 'other') return;
     captureChain = captureChain
-      .then(() => handleFinishedRequest(request, policy))
+      .then(() => pipeline.processEntry(request))
       .catch(() => reportEvent('body_read_failed', 'capture_pipeline_failed'));
   });
 
   if (chrome.devtools.network.onNavigated) {
     chrome.devtools.network.onNavigated.addListener((url) => {
-      const site = classifySite(url);
+      const site = CapturePipeline.classifySite(url);
       if (site === inspectedSite) return;
       inspectedSite = site;
       if (captureEnabled) void reportEvent('site_changed');
     });
   }
 
-  inspectedSite = await detectInitialSite();
+  inspectedSite = await CapturePipeline.detectInspectedSite(
+    chrome.devtools.inspectedWindow
+  );
   if (captureEnabled) await reportEvent('listening');
   setInterval(() => void sendHeartbeat(), HEARTBEAT_MS);
 }

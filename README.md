@@ -86,6 +86,13 @@ npm start
 4. При временной localhost-ошибке payload остаётся в локальной очереди до подтверждённого ACK. Повторных TikTok/CDN-запросов нет.
 5. Когда исчерпан capture budget сервера, доставка ставится на паузу: захваты хранятся в очереди и уходят сами после **Reset budget** в dashboard. Не перезагружайте чат ради повторного захвата.
 6. Захват, который сервер отклонил (`Held captures` в popup), можно повторить, сохранить файлом для ручного импорта или удалить.
+7. Панель **Sticker Capture** показывает ленту этой сессии браузера: миниатюру, состояние (`Added to library`, `Already in library`, `Delivering…`, `Held`, `Rejected`) и ссылку **Open in library**. Лента и миниатюры живут только в памяти (`chrome.storage.session`) и исчезают при закрытии Chrome.
+8. Если захват был выключен, когда стикеры загрузились, нажмите в панели **Capture from Network log**: расширение пройдёт по ответам, которые DevTools уже записал с момента открытия, через ту же политику. Ни одного нового запроса к TikTok не создаётся — не перезагружайте чат, чтобы «наполнить» журнал.
+9. Стикер, который сервер уже принял, повторно не отправляется: расширение помнит хэши (до 2000, сброс при смене токена или адреса сервера).
+10. По умолчанию новые захваты конвертируются для Telegram одной задачей на серию (**Health → Capture extension**, флажок автоконвертации; настройка хранится в `output/capture-settings.json`).
+11. В панели есть счётчик «TikTok images refused by the policy» с обезличенными примерами путей: аватары там ожидаемы, но много записей `path not sticker specific` или `host not allowed` при видимых в чате стикерах означают, что TikTok сменил формат ссылок и политику пора обновить.
+
+TikTok отдаёт один стикер в нескольких размерах с общим ключом (`…<ключ>~tplv-…-video2sticker-mid.webp`, `…-full.webp`). Dashboard узнаёт ключ по URL захвата или по имени вручную импортированного файла. Если в библиотеке есть более крупный захват того же стикера, инспектор показывает **Open it**, а экран пака — **Use larger capture** (замена сохраняет позицию и эмодзи). Файлы при этом не удаляются.
 
 Сам backend не видит DevTools, поэтому расширение отправляет на localhost короткий heartbeat (состояние слушателя, счётчики очереди, версия — без URL и данных страницы). Пока heartbeat свежий, dashboard показывает то же состояние, что и popup (например `Extension · Watching TikTok tab`, «Last signal 5 s ago»); без него — `Awaiting DevTools` или последнее подтверждённое принятие. Словарь статусов — [docs/extension/SPEC.md](docs/extension/SPEC.md). Отклонённый политикой файл (например, аватар) dashboard показывает отдельно от ошибки доставки.
 
@@ -137,6 +144,7 @@ Dashboard сначала вызывает `GET /api/session`; сервер ус�
 | `POST` | `/api/session/reset` | Начать новый DevTools capture budget |
 | `POST` | `/api/extension/pair`, `/api/extension/token`, `/api/extension/unpair` | Подключить расширение / показать токен / отключить (dashboard session) |
 | `POST` | `/api/extension/heartbeat` | Состояние слушателя от расширения; Bearer token обязателен |
+| `POST` | `/api/extension/settings` | `{ autoConvert }` — автоконвертация новых захватов (dashboard session) |
 | `POST` | `/api/library/archive` | Создать неизменяемый snapshot библиотеки |
 | `GET` | `/api/library/archives` | Список архивов из manifest |
 | `POST` | `/api/library/archives/:id/verify` | Read-only проверка SHA-256 архива |

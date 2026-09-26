@@ -43,6 +43,7 @@ const {
 } = require('./lib/libraryArchive');
 const { createLocalSecurity, isExtensionOrigin } = require('./lib/localSecurity');
 const { IngestTokenStore, IngestTokenError } = require('./lib/ingestTokenStore');
+const { CaptureSettings } = require('./lib/captureSettings');
 const { PackStore, PackError, PACK_ID_PATTERN } = require('./lib/packStore');
 const { buildPackExport } = require('./lib/packExport');
 const {
@@ -61,7 +62,8 @@ const {
   CAPTURE_MIN_INTERVAL_MS,
   CAPTURE_JITTER_MS,
   INGEST_RATE_WINDOW_MS,
-  INGEST_RATE_MAX
+  INGEST_RATE_MAX,
+  AUTO_CONVERT_DELAY_MS
 } = require('./lib/config');
 
 const app = express();
@@ -88,6 +90,9 @@ const ARCHIVES_DIR = resolveUnder(OUTPUT_DIR, 'archives');
 const ingestTokens = new IngestTokenStore({
   envToken: INGEST_TOKEN,
   filePath: path.join(OUTPUT_DIR, '.ingest-token')
+});
+const captureSettings = new CaptureSettings({
+  filePath: path.join(OUTPUT_DIR, 'capture-settings.json')
 });
 
 function getCapturedDir(dateStr = getTodayDateStr()) {
@@ -294,6 +299,7 @@ function getStatusPayload() {
     devtools: {
       enabled: ingestEnabled,
       pairing: ingestTokens.status(),
+      autoConvert: captureSettings.get().autoConvert,
       extension: extensionSnapshot(),
       state: !ingestEnabled ? 'disabled' : lastIngestError ? 'local_delivery_failed' : accepted ? 'last_asset_accepted' : 'awaiting_devtools',
       listening: null,
@@ -702,6 +708,7 @@ app.post('/api/ingest', security.requireExtension, async (req, res) => {
       source: 'devtools',
       countsBudget: true
     });
+    if (!captured.duplicate) scheduleAutoConvert(captured.sticker.id);
     return res.json({
       success: true,
       duplicate: captured.duplicate,
@@ -820,6 +827,16 @@ app.post('/api/extension/token', (_req, res) => {
   const token = ingestTokens.current();
   if (!token) return res.status(404).json({ error: 'The extension is not connected.', code: 'NOT_PAIRED' });
   return sendTokenResponse(res, token);
+});
+
+app.post('/api/extension/settings', (req, res) => {
+  try {
+    const settings = captureSettings.update(req.body);
+    emitStatus();
+    return res.json({ settings });
+  } catch (error) {
+    return res.status(error.status || 500).json({ error: error.status ? error.message : 'Settings could not be saved.' });
+  }
 });
 
 app.post('/api/extension/unpair', (_req, res) => {
@@ -1837,16 +1854,40 @@ app.get('/api/jobs', (_req, res) => {
   res.json(getJobsPayload());
 });
 
-app.post('/api/jobs/convert', (req, res) => {
-  let ids;
-  let startTimes;
-  try {
-    ids = parseJobIds(req.body?.ids);
-    startTimes = parseJobStartTimes(req.body?.startTimes);
-  } catch (error) {
-    return res.status(error.statusCode || 400).json({ error: error.message });
-  }
+// New live captures are converted like a manual import with auto-convert:
+// captures that arrive close together share one job.
+const AUTO_CONVERT_MAX_WAIT_MS = 15_000;
+let autoConvertIds = [];
+let autoConvertFirstAt = 0;
+let autoConvertTimer = null;
 
+function flushAutoConvert() {
+  clearTimeout(autoConvertTimer);
+  autoConvertTimer = null;
+  const ids = [...new Set(autoConvertIds)];
+  autoConvertIds = [];
+  for (let index = 0; index < ids.length; index += MAX_JOB_ITEMS) {
+    const chunk = ids.slice(index, index + MAX_JOB_ITEMS);
+    startConvertJob(chunk, {}, `Convert ${chunk.length} captured sticker${plural(chunk.length)}`);
+  }
+}
+
+function scheduleAutoConvert(stickerId) {
+  if (!captureSettings.get().autoConvert) return;
+  if (!autoConvertIds.length) autoConvertFirstAt = Date.now();
+  autoConvertIds.push(stickerId);
+  clearTimeout(autoConvertTimer);
+  const waited = Date.now() - autoConvertFirstAt;
+  if (autoConvertIds.length >= MAX_JOB_ITEMS || waited >= AUTO_CONVERT_MAX_WAIT_MS) {
+    flushAutoConvert();
+    return;
+  }
+  autoConvertTimer = setTimeout(flushAutoConvert, Math.min(AUTO_CONVERT_DELAY_MS, AUTO_CONVERT_MAX_WAIT_MS - waited));
+  autoConvertTimer.unref();
+}
+
+// Queues a conversion job; every skipped ID carries its reason.
+function startConvertJob(ids, startTimes, label) {
   // Resolve eligibility up front so the report explains every skipped ID.
   const pending = jobRegistry.pendingStickerIds();
   const plan = ids.map((id) => {
@@ -1858,7 +1899,7 @@ app.post('/api/jobs/convert', (req, res) => {
     return { stickerId: id, state: 'queued', sticker, inputPath };
   });
 
-  const job = jobRegistry.create('convert', plan, { label: `Convert ${ids.length} sticker${plural(ids.length)}` });
+  const job = jobRegistry.create('convert', plan, { label });
 
   for (const entry of plan) {
     if (entry.state !== 'queued') continue;
@@ -1892,6 +1933,20 @@ app.post('/api/jobs/convert', (req, res) => {
     );
   }
 
+  return job;
+}
+
+app.post('/api/jobs/convert', (req, res) => {
+  let ids;
+  let startTimes;
+  try {
+    ids = parseJobIds(req.body?.ids);
+    startTimes = parseJobStartTimes(req.body?.startTimes);
+  } catch (error) {
+    return res.status(error.statusCode || 400).json({ error: error.message });
+  }
+
+  const job = startConvertJob(ids, startTimes, `Convert ${ids.length} sticker${plural(ids.length)}`);
   return res.status(202).json({ job: jobRegistry.get(job.id) });
 });
 

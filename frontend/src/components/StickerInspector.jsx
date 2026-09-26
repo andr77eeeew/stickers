@@ -127,7 +127,7 @@ function SliceControl({ sticker, selectedStartTimes, setSelectedStartTimes }) {
 
 export function StickerInspector({
   sticker, loading, onClose, handleConvert, openEditor, triggerBrowserDownload,
-  handleSaveTags, selectedStartTimes, setSelectedStartTimes, copyText, packSection
+  handleSaveTags, selectedStartTimes, setSelectedStartTimes, copyText, packSection, variant
 }) {
   const headingRef = useRef(null);
   const state = sticker ? getStickerState(sticker) : null;
@@ -229,6 +229,13 @@ export function StickerInspector({
       <section className="inspector-section">
         <h3>Telegram check</h3>
         <TelegramCheck rows={getTelegramCheck(sticker)} />
+        {variant?.better && (
+          <p className="inline-alert tone-unknown">
+            A larger capture of this TikTok sticker is in the library:{' '}
+            {variant.better.width}×{variant.better.height} px instead of {sticker.width}×{sticker.height} px.{' '}
+            <button type="button" className="link-btn" onClick={() => variant.onOpen(variant.better.id)}>Open it</button>
+          </p>
+        )}
       </section>
 
       <div className="inspector-actions">
@@ -294,6 +301,17 @@ export function StickerInspector({
           <dt>Source</dt>
           <dd>{sticker.captureSource === 'devtools' ? 'DevTools capture' : sticker.captureSource === 'manual' ? 'Manual import' : 'Earlier capture'}</dd>
           {importName && (<><dt>Import name</dt><dd className="break">{importName}</dd></>)}
+          {variant?.entry && (
+            <>
+              <dt>TikTok variant</dt>
+              <dd>
+                {variant.entry.variant}
+                {' · '}
+                {variant.entry.siblingIds.length} other capture{variant.entry.siblingIds.length === 1 ? '' : 's'} of this sticker
+                {variant.entry.bestId === sticker.id && ' · largest'}
+              </dd>
+            </>
+          )}
           {sticker.convertedAt && (<><dt>Converted</dt><dd>{new Date(sticker.convertedAt).toLocaleString()}</dd></>)}
         </dl>
       </section>

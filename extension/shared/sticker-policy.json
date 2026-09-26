@@ -44,5 +44,13 @@
     "profile-photo",
     "profile_photo",
     "tos-maliva-avt"
+  ],
+  "diagnosticHostSuffixes": [
+    "tiktokcdn.com",
+    "tiktokcdn-us.com",
+    "tiktokcdn-eu.com",
+    "ibyteimg.com",
+    "byteimg.com",
+    "tiktokv.com"
   ]
 }

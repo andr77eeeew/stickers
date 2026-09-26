@@ -111,6 +111,14 @@ export function usePacks({ packState, setPackState, showToast }) {
     items: pack.items.filter((item) => item.stickerId !== stickerId)
   })), [updatePack]);
 
+  // Swaps a sticker for another capture of it, keeping position and emoji.
+  const replaceSticker = useCallback((packId, fromId, toId) => updatePack(packId, (pack) => {
+    if (pack.items.some((item) => item.stickerId === toId)) return null;
+    return {
+      items: pack.items.map((item) => (item.stickerId === fromId ? { ...item, stickerId: toId } : item))
+    };
+  }), [updatePack]);
+
   /** Downloads the ZIP. Problems reported by the server are returned, not thrown. */
   const exportPack = useCallback(async (packId) => {
     setExportingId(packId);
@@ -146,6 +154,6 @@ export function usePacks({ packState, setPackState, showToast }) {
 
   return {
     createPack, activatePack, deletePack, renamePack, setItems, addStickers, setEmoji, removeSticker,
-    exportPack, exportingId
+    replaceSticker, exportPack, exportingId
   };
 }

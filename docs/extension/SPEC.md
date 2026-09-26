@@ -53,6 +53,19 @@ Dashboard показывает состояние слушателя тольк�
 | `server_error` | Server error | problem |
 | `unknown` | Not checked | pending |
 
+### Лента сессии (панель DevTools)
+
+| Состояние | Текст | Тон |
+| --- | --- | --- |
+| `new` | Added to library | ok |
+| `duplicate` | Already in library | ok |
+| `queued` | Delivering… (или `Delivering · <причина>`) | pending |
+| `held` | Held: <причина> | problem |
+| `rejected` | Rejected: <причина> | problem |
+| `discarded` | Discarded | pending |
+
+Итог «Capture from Network log»: `Found N sticker responses: X sent to the library, Y already in library, …`; без стикеров — объяснение, что журнал содержит только запросы с момента открытия DevTools и что перезагружать чат не нужно.
+
 ### Очередь
 
 `Empty` (ok) · `N delivering` (pending) · `N held: budget paused` (pending) · `N (M blocked)` (problem).

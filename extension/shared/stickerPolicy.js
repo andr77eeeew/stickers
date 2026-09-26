@@ -81,6 +81,11 @@
         raw.contentTypeHints === undefined
           ? []
           : asLowercaseStringArray(raw.contentTypeHints, 'contentTypeHints')
+      ),
+      diagnosticHostSuffixes: Object.freeze(
+        raw.diagnosticHostSuffixes === undefined
+          ? []
+          : asLowercaseStringArray(raw.diagnosticHostSuffixes, 'diagnosticHostSuffixes')
       )
     });
   }

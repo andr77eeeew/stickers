@@ -138,6 +138,7 @@ const TIKTOK_DOCUMENT = Object.freeze({
 
 function createChrome({ storage = {}, resources = [TIKTOK_DOCUMENT] } = {}) {
   const store = structuredClone(storage);
+  const sessionStore = {};
   const listeners = {
     storage: [],
     message: [],
@@ -180,6 +181,19 @@ function createChrome({ storage = {}, resources = [TIKTOK_DOCUMENT] } = {}) {
             if (callback) callback();
             for (const listener of listeners.storage) listener(changes, 'local');
           });
+        }
+      },
+      session: {
+        get(defaults, callback) {
+          const result = {};
+          for (const [key, fallback] of Object.entries(defaults || {})) {
+            result[key] = key in sessionStore ? structuredClone(sessionStore[key]) : fallback;
+          }
+          queueMicrotask(() => callback(result));
+        },
+        set(values, callback) {
+          for (const [key, value] of Object.entries(values)) sessionStore[key] = structuredClone(value);
+          queueMicrotask(() => callback && callback());
         }
       },
       onChanged: { addListener: (listener) => listeners.storage.push(listener) }
@@ -225,7 +239,7 @@ function createChrome({ storage = {}, resources = [TIKTOK_DOCUMENT] } = {}) {
     }
   };
 
-  return { chrome, store, listeners, alarms, badge, panels };
+  return { chrome, store, sessionStore, listeners, alarms, badge, panels };
 }
 
 function createFetch({ server }) {
@@ -305,7 +319,8 @@ function createContext(chrome, fetch, intervals) {
     btoa,
     atob,
     structuredClone,
-    queueMicrotask
+    queueMicrotask,
+    TextEncoder
   });
 }
 
@@ -397,7 +412,7 @@ async function loadDevtools({
   context.addEventListener = (type, listener) => {
     (pageListeners[type] = pageListeners[type] || []).push(listener);
   };
-  for (const file of ['shared/stickerPolicy.js', 'shared/capturePayload.js', 'devtools.js']) {
+  for (const file of ['shared/stickerPolicy.js', 'shared/capturePayload.js', 'shared/capturePipeline.js', 'devtools.js']) {
     runFile(context, file);
   }
   await settle();

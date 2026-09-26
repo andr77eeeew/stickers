@@ -45,6 +45,24 @@ export function ExtensionConnection({ devtools, ready, copyText, focused, onFocu
     }
   };
 
+  const setAutoConvert = async (autoConvert) => {
+    setBusy(true);
+    setError('');
+    try {
+      const response = await apiFetch('/api/extension/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ autoConvert })
+      });
+      const result = await readJson(response);
+      if (!response.ok) throw new Error(result.error || 'The setting could not be saved.');
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const disconnect = async () => {
     setConfirmOpen(false);
     await call('/api/extension/unpair', { keepToken: false });
@@ -97,6 +115,18 @@ export function ExtensionConnection({ devtools, ready, copyText, focused, onFocu
           </dd>
         </div>
       </dl>
+
+      {pairing.state !== 'none' && (
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={devtools?.autoConvert !== false}
+            disabled={busy || !ready}
+            onChange={(event) => setAutoConvert(event.target.checked)}
+          />
+          Convert new captures to Telegram format automatically (one job per burst of captures)
+        </label>
+      )}
 
       {token && (
         <div className="token-box">

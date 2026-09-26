@@ -6,9 +6,10 @@ import { StickerMedia } from './StickerMedia';
 import { ConfirmDialog } from './ConfirmDialog';
 import { NewPackForm } from './PackControls';
 import {
-  BOT_COMMAND, KIND_LABELS, PACK_LIMITS, getItemProblems, moveItem, parseEmojiInput, summarizePack
+  BOT_COMMAND, KIND_LABELS, PACK_LIMITS, getItemProblems, moveItem, parseEmojiInput, stickerKind, summarizePack
 } from '../lib/packModel';
 import { getShortId, toSafeErrorMessage } from '../lib/stickerModel';
+import { betterVariant } from '../lib/variantModel';
 
 const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
 
@@ -60,7 +61,7 @@ function RowEmoji({ item, onSave, position }) {
 }
 
 function PackDetail({
-  pack, isActive, stickersById, packActions, onOpenSticker, onGoToLibrary, onAfterDelete
+  pack, isActive, stickersById, variantIndex, packActions, onOpenSticker, onGoToLibrary, onAfterDelete
 }) {
   const summary = summarizePack(pack, stickersById);
   const [renaming, setRenaming] = useState(false);
@@ -161,6 +162,10 @@ function PackDetail({
             const sticker = stickersById.get(item.stickerId);
             const problems = getItemProblems(item, sticker);
             const position = index + 1;
+            const better = sticker ? betterVariant(sticker, variantIndex, stickersById) : null;
+            const canUseBetter = better
+              && stickerKind(better) === stickerKind(sticker)
+              && !pack.items.some((other) => other.stickerId === better.id);
             return (
               <li
                 key={item.stickerId}
@@ -202,6 +207,15 @@ function PackDetail({
                       <span key={problem.code} className={`badge ${problem.code === 'no_emoji' ? 'badge-warning' : 'badge-problem'}`}>{problem.label}</span>
                     ))}</span>
                     : <span className="badge badge-ok">Ready</span>}
+                  {canUseBetter && (
+                    <button
+                      type="button"
+                      className="link-btn small"
+                      onClick={() => run(() => packActions.replaceSticker(pack.id, item.stickerId, better.id))}
+                    >
+                      Use larger capture ({better.width}×{better.height})
+                    </button>
+                  )}
                 </span>
                 <RowEmoji
                   key={item.emoji.join('')}
@@ -273,7 +287,7 @@ function PackDetail({
 }
 
 export function PacksView({
-  packState, stickersById, selectedPackId, onSelectPack, packActions, onOpenSticker, onGoToLibrary, bootstrapState
+  packState, stickersById, variantIndex, selectedPackId, onSelectPack, packActions, onOpenSticker, onGoToLibrary, bootstrapState
 }) {
   const { packs, activePackId, loadError, loaded } = packState;
   const selected = packs.find((pack) => pack.id === selectedPackId)
@@ -330,6 +344,7 @@ export function PacksView({
               pack={selected}
               isActive={selected.id === activePackId}
               stickersById={stickersById}
+              variantIndex={variantIndex}
               packActions={packActions}
               onOpenSticker={onOpenSticker}
               onGoToLibrary={onGoToLibrary}

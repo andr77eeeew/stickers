@@ -157,9 +157,12 @@ test('service worker imports only bundled scripts', () => {
 
 test('DevTools listener reads bodies only through getContent', () => {
   const devtools = scripts.find(({ file }) => file === 'devtools.js').source;
+  const pipeline = scripts.find(({ file }) => file === 'shared/capturePipeline.js').source;
   assert.match(devtools, /onRequestFinished\.addListener/);
-  assert.match(devtools, /\.getContent\(/);
-  assert.doesNotMatch(devtools, /\bfetch\s*\(/);
+  assert.match(pipeline, /\.getContent\(/);
+  for (const source of [devtools, pipeline]) {
+    assert.doesNotMatch(source, /\bfetch\s*\(/);
+  }
 });
 
 test('extension pages load only bundled resources', () => {
