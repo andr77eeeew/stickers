@@ -54,28 +54,42 @@
     </label>
 
     <label class="field">
-      Bearer token
+      Connection token
       <input
         type="password"
         id="ingestToken"
         autocomplete="off"
         spellcheck="false"
+        placeholder="Paste from the dashboard"
       />
     </label>
+    <p class="hint">
+      In Sticker Workspace open <strong>Health → Capture extension</strong>,
+      choose <strong>Connect extension</strong> and paste the token here.
+    </p>
 
-    <div class="button-row">
-      <button id="generateToken" type="button" class="secondary">Generate</button>
-      <button id="copyToken" type="button" class="secondary">Copy</button>
-    </div>
     <button id="saveSettings" type="button">Save and reconnect</button>
     <button id="retryQueue" type="button" class="secondary full">
       Retry held items
     </button>
     <p id="message" class="message" hidden></p>
+
+    <details class="advanced">
+      <summary>Advanced: token in .env</summary>
+      <p class="hint">
+        Instead of connecting from the dashboard, generate a token here and set
+        the same value as <code>INGEST_TOKEN</code> in the server <code>.env</code>,
+        then restart the server. A token in <code>.env</code> takes priority.
+      </p>
+      <div class="button-row">
+        <button id="generateToken" type="button" class="secondary">Generate</button>
+        <button id="copyToken" type="button" class="secondary">Copy</button>
+      </div>
+    </details>
   </section>
 
   <section class="tips">
-    <p>1. Set the same token as <code>INGEST_TOKEN</code> on the server.</p>
+    <p>1. Connect the extension in the dashboard (Health → Capture extension).</p>
     <p>2. Turn on <strong>Capture enabled</strong>.</p>
     <p>3. Open Chrome DevTools on the TikTok Messages tab and keep it open.</p>
     <p>4. Only stickers loaded after DevTools opens can be captured. Do not reload the chat to capture again.</p>

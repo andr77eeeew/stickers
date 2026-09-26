@@ -155,16 +155,26 @@ test('missing token holds deliveries without contacting the server', async () =>
   assert.equal(status.hasToken, false);
 });
 
-test('first run generates a token but keeps capture disabled', async () => {
+test('first run waits for a dashboard token and keeps capture disabled', async () => {
   const harness = await loadBackground({ storage: {} });
   for (const listener of harness.listeners.installed) listener({ reason: 'install' });
-  await new Promise((resolve) => setImmediate(resolve));
+  await settle();
   const status = await harness.status();
 
   assert.equal(status.captureEnabled, false);
-  assert.equal(status.hasToken, true);
-  assert.ok(harness.store.ingestToken.length >= 40);
+  assert.equal(status.hasToken, false);
+  assert.equal(harness.store.ingestToken, '');
   assert.equal(harness.badge.text, 'OFF');
+  assert.equal(harness.server.heartbeats.length, 0, 'no token, no heartbeat');
+});
+
+test('an existing token is kept across updates', async () => {
+  const harness = await loadBackground({
+    storage: { settingsVersion: 2, ingestToken: 'kept-token', captureEnabled: true }
+  });
+  for (const listener of harness.listeners.installed) listener({ reason: 'update' });
+  await settle();
+  assert.equal(harness.store.ingestToken, 'kept-token');
 });
 
 test('status never exposes the ingest token', async () => {
@@ -426,4 +436,48 @@ test('B4: disabled capture sends no heartbeat until it is enabled', async () => 
   await harness.tickIntervals();
   const heartbeat = harness.messages.find(({ type }) => type === 'DEVTOOLS_HEARTBEAT');
   assert.deepEqual({ tabId: heartbeat.tabId, site: heartbeat.site }, { tabId: 7, site: 'tiktok' });
+});
+
+test('server heartbeat reports listener state with the bearer token only when it changes', async () => {
+  const harness = await loadBackground();
+  const beats = () => harness.server.heartbeats.map(({ body }) => body.listenerState);
+  assert.deepEqual(beats(), ['closed'], 'bootstrap announces the extension');
+  const [first] = harness.server.heartbeats;
+  assert.equal(first.headers.Authorization, 'Bearer test-ingest-token');
+  assert.deepEqual(Object.keys(first.body).sort(), ['listenerState', 'pausedReason', 'queue', 'version']);
+  assert.deepEqual(first.body.queue, { count: 0, blocked: 0, paused: 0 });
+  assert.match(first.body.version, /^\d+\.\d+\.\d+$/);
+
+  await harness.sendAndSettle({ type: 'DEVTOOLS_EVENT', kind: 'listening', tabId: 7, site: 'tiktok' });
+  assert.deepEqual(beats(), ['closed', 'watching']);
+
+  for (let step = 0; step < 3; step += 1) {
+    await harness.sendAndSettle({ type: 'DEVTOOLS_HEARTBEAT', tabId: 7, site: 'tiktok' });
+  }
+  assert.equal(beats().length, 2, 'unchanged state is throttled');
+
+  await harness.sendAndSettle({ type: 'DEVTOOLS_CLOSED', tabId: 7 });
+  assert.deepEqual(beats(), ['closed', 'watching', 'closed']);
+  assert.equal((await harness.status()).listenerState, 'closed');
+
+  harness.chrome.storage.local.set({ captureEnabled: false });
+  await settle();
+  assert.equal(beats().at(-1), 'off');
+  assert.deepEqual(harness.network.violations, []);
+});
+
+test('heartbeat rejection surfaces as a token problem before any capture', async () => {
+  const harness = await loadBackground({ storage: { ...READY_STORAGE, captureEnabled: false } });
+  harness.server.onHeartbeat = () => ({ status: 401, body: { error: 'Invalid or missing bearer token.', code: 'TOKEN_REJECTED' } });
+  harness.chrome.storage.local.set({ captureEnabled: true });
+  await settle();
+  assert.equal((await harness.status()).serverState, 'unauthorized');
+});
+
+test('closing DevTools notifies the background right away', async () => {
+  const harness = await loadDevtools();
+  harness.closeDevtools();
+  await settle();
+  const closed = harness.messages.find(({ type }) => type === 'DEVTOOLS_CLOSED');
+  assert.deepEqual({ tabId: closed.tabId, site: closed.site }, { tabId: 7, site: 'tiktok' });
 });

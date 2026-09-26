@@ -212,3 +212,14 @@ h2 {
   width: auto;
   padding: 6px 8px;
 }
+
+.advanced {
+  margin-top: 10px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.advanced summary {
+  cursor: pointer;
+  margin-bottom: 6px;
+}

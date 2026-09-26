@@ -230,6 +230,16 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
 });
 
+// Best effort: lets the dashboard show "DevTools not open" right away instead
+// of waiting for the heartbeat to go stale.
+if (typeof addEventListener === 'function') {
+  addEventListener('pagehide', () => {
+    chrome.runtime.sendMessage({ type: 'DEVTOOLS_CLOSED', ...listenerInfo() }, () => {
+      void chrome.runtime.lastError;
+    });
+  });
+}
+
 chrome.devtools.panels.create(
   'Sticker Capture',
   '',

@@ -38,16 +38,18 @@
 1. Сервер должен слушать только `127.0.0.1`, не `0.0.0.0`.
 2. Не пробрасывайте порт 3001 через router, tunnel, reverse proxy или firewall rule.
 3. Dashboard сначала получает HttpOnly `SameSite=Strict` session cookie через `GET /api/session`; WebSocket `/ws` открывается только после этого.
-4. Для расширения обязателен отдельный длинный `INGEST_TOKEN`:
+4. Для расширения обязателен отдельный длинный токен:
 
-   - сгенерируйте token в popup расширения;
-   - скопируйте его в `INGEST_TOKEN` локального `.env`;
-   - перезапустите backend;
-   - не коммитьте `.env`, не вставляйте token в issue, screenshot или HAR.
+   - создайте его в dashboard (**Health → Capture extension → Connect extension**) и вставьте в popup расширения; сервер хранит его в `output/.ingest-token` с правами только для владельца;
+   - либо задайте `INGEST_TOKEN` в локальном `.env` (он имеет приоритет) и перезапустите backend;
+   - токен не попадает в `/api/status`, WebSocket и archive snapshots; **Disconnect** отзывает его;
+   - не коммитьте `.env`, не вставляйте токен в issue, screenshot или HAR.
 
 5. Popup должен показывать server `Online`, queue `Empty` и listener `Watching TikTok tab` во время live-теста.
 
-Offline/manual dashboard продолжает работать без `INGEST_TOKEN`; в этом случае extension ingest намеренно отключён.
+Offline/manual dashboard продолжает работать без подключения; в этом случае extension ingest намеренно отключён.
+
+Heartbeat расширения уходит только на localhost и содержит лишь состояние слушателя, счётчики очереди и версию расширения — без URL, байтов и данных страницы TikTok.
 
 ## Чек-лист live-теста
 

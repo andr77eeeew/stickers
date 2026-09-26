@@ -16,6 +16,8 @@ const MAX_EVENTS = 20;
 const HELD_LIST_LIMIT = 50;
 const BUDGET_PAUSE_REASON = 'capture_budget_exhausted';
 const LISTENER_SITES = ['tiktok', 'other', 'unknown'];
+const SERVER_HEARTBEAT_MS = 20000;
+const SERVER_HEARTBEAT_MIN_GAP_MS = 2000;
 
 const BADGE_COLORS = Object.freeze({
   off: '#5D6B80',
@@ -57,18 +59,9 @@ function storageSet(values) {
   return new Promise((resolve) => chrome.storage.local.set(values, resolve));
 }
 
-function generateToken() {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary)
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/g, '');
-}
-
-async function initializeSettings(generateMissingToken) {
+// The token comes from the dashboard (Health → Capture extension) or from
+// INGEST_TOKEN in .env; the extension no longer invents one on install.
+async function initializeSettings() {
   const current = await storageGet({
     settingsVersion: undefined,
     serverUrl: undefined,
@@ -85,11 +78,8 @@ async function initializeSettings(generateMissingToken) {
   } else if (typeof current.captureEnabled === 'undefined') {
     updates.captureEnabled = false;
   }
-  if (
-    typeof current.ingestToken === 'undefined' ||
-    (generateMissingToken && !String(current.ingestToken || '').trim())
-  ) {
-    updates.ingestToken = generateToken();
+  if (typeof current.ingestToken === 'undefined') {
+    updates.ingestToken = '';
   }
   if (Object.keys(updates).length > 0) await storageSet(updates);
 }
@@ -424,6 +414,7 @@ async function scheduleNextDelivery() {
     });
   }
   await updateBadge();
+  void sendServerHeartbeat(false);
   return queue;
 }
 
@@ -575,6 +566,67 @@ async function pingServer() {
   return getPublicStatus();
 }
 
+// Tells the local dashboard what only the extension knows: whether DevTools
+// is watching a TikTok tab. Loopback only, never more often than needed.
+let lastServerHeartbeat = { key: '', at: 0 };
+
+async function sendServerHeartbeat(force) {
+  const settings = await getSettings();
+  if (!settings.serverUrl || !settings.ingestToken) return;
+  const status = await getPublicStatus();
+  const queue = {
+    count: status.queue.count,
+    blocked: status.queue.blocked,
+    paused: status.queue.paused
+  };
+  const key = JSON.stringify([status.listenerState, queue, status.pausedReason]);
+  const now = Date.now();
+  const elapsed = now - lastServerHeartbeat.at;
+  const due =
+    force ||
+    elapsed >= SERVER_HEARTBEAT_MS ||
+    (key !== lastServerHeartbeat.key && elapsed >= SERVER_HEARTBEAT_MIN_GAP_MS);
+  if (!due) return;
+  lastServerHeartbeat = { key, at: now };
+
+  try {
+    const response = await fetchWithTimeout(
+      `${settings.serverUrl}/api/extension/heartbeat`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${settings.ingestToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          listenerState: status.listenerState,
+          queue,
+          pausedReason: status.pausedReason,
+          version: chrome.runtime.getManifest().version
+        })
+      }
+    );
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) lastServerHeartbeat.key = '';
+    await patchStatus((current) => ({
+      serverState: DeliveryPolicy.serverStateForResponse(response.status, body),
+      session: response.ok && body.session ? body.session : current.session
+    }));
+  } catch {
+    lastServerHeartbeat.key = '';
+    await patchStatus({ serverState: 'offline' });
+  }
+}
+
+async function forgetListener(message) {
+  const key = String(message.tabId ?? 'default');
+  await patchStatus((current) => {
+    const listeners = { ...current.listeners };
+    delete listeners[key];
+    return { listeners };
+  });
+}
+
 async function recordHeartbeat(message) {
   const key = String(message.tabId ?? 'default');
   const site = LISTENER_SITES.includes(message.site) ? message.site : 'unknown';
@@ -672,9 +724,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   } else if (message.type === 'GET_ITEM_FILE') {
     operation = getHeldItemFile(message.id);
   } else if (message.type === 'DEVTOOLS_HEARTBEAT') {
-    operation = recordHeartbeat(message).then(() => ({ ok: true }));
+    operation = recordHeartbeat(message).then(() => {
+      void sendServerHeartbeat(false);
+      return { ok: true };
+    });
   } else if (message.type === 'DEVTOOLS_EVENT') {
-    operation = recordDevtoolsEvent(message).then(() => ({ ok: true }));
+    operation = recordDevtoolsEvent(message).then(() => {
+      void sendServerHeartbeat(['listening', 'site_changed'].includes(message.kind));
+      return { ok: true };
+    });
+  } else if (message.type === 'DEVTOOLS_CLOSED') {
+    operation = forgetListener(message).then(() => {
+      void sendServerHeartbeat(true);
+      return { ok: true };
+    });
   } else {
     return false;
   }
@@ -700,6 +763,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
         CaptureQueueStore.summary()
       ]);
       if (status.pausedReason || queue.paused > 0) await pingServer();
+      await sendServerHeartbeat(false);
     });
   }
 });
@@ -715,23 +779,25 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
         processQueue()
       );
     }
+    void sendServerHeartbeat(true);
   }
 });
 
-async function bootstrap(generateMissingToken) {
-  await initializeSettings(generateMissingToken);
+async function bootstrap() {
+  await initializeSettings();
   await getPolicy();
   chrome.alarms.create(PERIODIC_ALARM, { periodInMinutes: 1 });
   await updateBadge();
   void processQueue();
+  void sendServerHeartbeat(true);
 }
 
 chrome.runtime.onInstalled.addListener(() => {
-  void bootstrap(true);
+  void bootstrap();
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  void bootstrap(false);
+  void bootstrap();
 });
 
-void bootstrap(false);
+void bootstrap();

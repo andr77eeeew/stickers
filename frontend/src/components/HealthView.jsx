@@ -4,6 +4,7 @@ import {
   CircleHelp, ShieldCheck, LoaderCircle
 } from 'lucide-react';
 import { Sheet } from './Sheet';
+import { ExtensionConnection } from './ExtensionConnection';
 import { apiFetch } from '../lib/api';
 import { countStorageIssues } from '../lib/stickerModel';
 import { describeFailure } from '../lib/jobModel';
@@ -132,7 +133,8 @@ function ArchiveRow({ archive, onVerify, verifying, busy }) {
 
 export function HealthView({
   storage, outputPath, copyText, onShowNeedsAction, onOpenSticker, stickerIds,
-  handleArchiveLibrary, archiving, bootstrapState, libraryTotal, setCaptureStatus
+  handleArchiveLibrary, archiving, bootstrapState, libraryTotal, setCaptureStatus,
+  devtools, focusSection, onFocusHandled
 }) {
   const [checking, setChecking] = useState(false);
   const [checkError, setCheckError] = useState('');
@@ -218,7 +220,7 @@ export function HealthView({
       <div className="page-heading">
         <div>
           <h1>Health</h1>
-          <p className="muted">Storage checks, archive snapshots and output folders. Nothing is removed or repaired automatically.</p>
+          <p className="muted">Storage checks, archive snapshots, output folders and the capture extension. Nothing is removed or repaired automatically.</p>
         </div>
       </div>
 
@@ -328,6 +330,14 @@ export function HealthView({
           This app never publishes to Telegram.
         </p>
       </section>
+
+      <ExtensionConnection
+        devtools={devtools}
+        ready={ready}
+        copyText={copyText}
+        focused={focusSection === 'capture-extension'}
+        onFocusHandled={onFocusHandled}
+      />
 
       <Sheet open={confirmOpen} onClose={() => setConfirmOpen(false)} className="sheet sheet-dialog" labelledBy={confirmTitleId}>
         <h2 id={confirmTitleId}>Create archive snapshot?</h2>

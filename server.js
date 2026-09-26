@@ -42,12 +42,12 @@ const {
   verifyLibraryArchive
 } = require('./lib/libraryArchive');
 const { createLocalSecurity, isExtensionOrigin } = require('./lib/localSecurity');
+const { IngestTokenStore, IngestTokenError } = require('./lib/ingestTokenStore');
 const { PackStore, PackError, PACK_ID_PATTERN } = require('./lib/packStore');
 const { buildPackExport } = require('./lib/packExport');
 const {
   HOST,
   PORT,
-  captureMode,
   INGEST_TOKEN,
   OUTPUT_DIR: CONFIG_OUTPUT_DIR,
   TEMP_DIR: CONFIG_TEMP_DIR,
@@ -66,7 +66,8 @@ const {
 
 const app = express();
 const security = createLocalSecurity({
-  ingestToken: INGEST_TOKEN,
+  // Read on every request: pairing in the dashboard can change the token.
+  ingestToken: () => ingestTokens.current(),
   dashboardOrigins: DASHBOARD_ORIGINS
 });
 const stickerPolicy = loadStickerPolicy();
@@ -84,6 +85,10 @@ const TEMP_DIR = path.resolve(CONFIG_TEMP_DIR || path.join(__dirname, 'temp'));
 const UPLOAD_DIR = resolveUnder(TEMP_DIR, 'uploads');
 const HAR_UPLOAD_DIR = resolveUnder(TEMP_DIR, 'har-uploads');
 const ARCHIVES_DIR = resolveUnder(OUTPUT_DIR, 'archives');
+const ingestTokens = new IngestTokenStore({
+  envToken: INGEST_TOKEN,
+  filePath: path.join(OUTPUT_DIR, '.ingest-token')
+});
 
 function getCapturedDir(dateStr = getTodayDateStr()) {
   const dir = resolveUnder(OUTPUT_DIR, path.join('captured', dateStr));
@@ -174,6 +179,12 @@ let lastIngestSource = null;
 let lastIngestError = null;
 // A payload refused by the sticker policy is not a delivery failure.
 let lastIngestRejection = null;
+// Last heartbeat from the capture extension; only the extension knows
+// whether DevTools is open on a TikTok tab.
+const EXTENSION_HEARTBEAT_STALE_MS = 45_000;
+const EXTENSION_LISTENER_STATES = new Set(['off', 'closed', 'other_site', 'watching_unconfirmed', 'watching']);
+let extensionHeartbeat = null;
+let extensionStaleTimer = null;
 let capturedStickers = [];
 const dbPath = path.join(OUTPUT_DIR, 'stickers_db.json');
 const database = new StickerDatabase(dbPath);
@@ -261,13 +272,30 @@ function broadcast(message) {
   });
 }
 
+function extensionSnapshot() {
+  if (!extensionHeartbeat) {
+    return { connected: false, lastSeenAt: null, listenerState: null, queue: null, pausedReason: null, version: null };
+  }
+  return {
+    connected: Date.now() - extensionHeartbeat.receivedAt < EXTENSION_HEARTBEAT_STALE_MS,
+    lastSeenAt: new Date(extensionHeartbeat.receivedAt).toISOString(),
+    listenerState: extensionHeartbeat.listenerState,
+    queue: extensionHeartbeat.queue,
+    pausedReason: extensionHeartbeat.pausedReason,
+    version: extensionHeartbeat.version
+  };
+}
+
 function getStatusPayload() {
   const accepted = Boolean(lastIngestAt);
+  const ingestEnabled = Boolean(ingestTokens.current());
   return {
-    captureMode,
+    captureMode: ingestEnabled ? 'devtools' : 'offline',
     devtools: {
-      enabled: Boolean(INGEST_TOKEN),
-      state: !INGEST_TOKEN ? 'disabled' : lastIngestError ? 'local_delivery_failed' : accepted ? 'last_asset_accepted' : 'awaiting_devtools',
+      enabled: ingestEnabled,
+      pairing: ingestTokens.status(),
+      extension: extensionSnapshot(),
+      state: !ingestEnabled ? 'disabled' : lastIngestError ? 'local_delivery_failed' : accepted ? 'last_asset_accepted' : 'awaiting_devtools',
       listening: null,
       requiresDevToolsOpen: true,
       lastAcceptedAt: lastIngestAt,
@@ -712,7 +740,98 @@ app.post('/api/ingest', security.requireExtension, async (req, res) => {
   }
 });
 
+const QUEUE_COUNT_MAX = 100_000;
+
+function sanitizeQueueCount(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? Math.min(number, QUEUE_COUNT_MAX) : 0;
+}
+
+function recordExtensionHeartbeat(body) {
+  const listenerState = String(body.listenerState || '');
+  if (!EXTENSION_LISTENER_STATES.has(listenerState)) {
+    const error = new Error('Unknown listenerState.');
+    error.status = 400;
+    throw error;
+  }
+  const queue = body.queue && typeof body.queue === 'object' ? body.queue : {};
+  const next = {
+    receivedAt: Date.now(),
+    listenerState,
+    queue: {
+      count: sanitizeQueueCount(queue.count),
+      blocked: sanitizeQueueCount(queue.blocked),
+      paused: sanitizeQueueCount(queue.paused)
+    },
+    pausedReason: /^[a-z_]{1,64}$/.test(String(body.pausedReason || '')) ? body.pausedReason : null,
+    version: /^[0-9][0-9.]{0,19}$/.test(String(body.version || '')) ? body.version : null
+  };
+  const previous = extensionSnapshot();
+  const changed =
+    !previous.connected ||
+    previous.listenerState !== next.listenerState ||
+    previous.pausedReason !== next.pausedReason ||
+    JSON.stringify(previous.queue) !== JSON.stringify(next.queue);
+  extensionHeartbeat = next;
+  clearTimeout(extensionStaleTimer);
+  // Tell the dashboard when the extension goes quiet.
+  extensionStaleTimer = setTimeout(emitStatus, EXTENSION_HEARTBEAT_STALE_MS + 1000);
+  extensionStaleTimer.unref();
+  if (changed) emitStatus();
+}
+
+app.post('/api/extension/heartbeat', security.requireExtension, (req, res) => {
+  try {
+    recordExtensionHeartbeat(req.body || {});
+  } catch (error) {
+    return res.status(error.status || 400).json({ error: error.message });
+  }
+  return res.json({ ok: true, session: sessionBudget.snapshot() });
+});
+
 app.use('/api', security.requireDashboard);
+
+function sendTokenResponse(res, token) {
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json({ token, pairing: ingestTokens.status() });
+}
+
+function sendTokenError(res, error) {
+  if (error instanceof IngestTokenError) {
+    return res.status(error.status).json({ error: error.message, code: error.code });
+  }
+  return res.status(500).json({ error: 'The connection token could not be saved.' });
+}
+
+// Creates (or replaces) the token the capture extension must present.
+app.post('/api/extension/pair', (_req, res) => {
+  try {
+    const token = ingestTokens.pair();
+    lastIngestError = null;
+    extensionHeartbeat = null;
+    emitStatus();
+    return sendTokenResponse(res, token);
+  } catch (error) {
+    return sendTokenError(res, error);
+  }
+});
+
+app.post('/api/extension/token', (_req, res) => {
+  const token = ingestTokens.current();
+  if (!token) return res.status(404).json({ error: 'The extension is not connected.', code: 'NOT_PAIRED' });
+  return sendTokenResponse(res, token);
+});
+
+app.post('/api/extension/unpair', (_req, res) => {
+  try {
+    ingestTokens.unpair();
+    extensionHeartbeat = null;
+    emitStatus();
+    return res.json({ pairing: ingestTokens.status() });
+  } catch (error) {
+    return sendTokenError(res, error);
+  }
+});
 
 app.post('/api/session/reset', (_req, res) => {
   sessionBudget.reset();
@@ -1999,8 +2118,13 @@ function startServer(port = PORT) {
     console.log(` Output folder: ${OUTPUT_DIR}`);
     console.log(' Capture mode: DevTools response bodies only (no CDP, DOM automation, or CDN refetch)');
     console.log(` Session budget: ${SESSION_MAX_CAPTURES} captures / ${Math.round(SESSION_MAX_MS / 60000)} min`);
-    console.log(` Extension ingest: ${INGEST_TOKEN ? 'Bearer token required' : 'DISABLED (set INGEST_TOKEN)'}`);
-    if (INGEST_TOKEN && listeningPort !== 3001) {
+    const tokenSource = ingestTokens.source();
+    console.log(` Extension ingest: ${tokenSource === 'env'
+      ? 'Bearer token from .env'
+      : tokenSource === 'paired'
+        ? 'Bearer token paired in the dashboard'
+        : 'DISABLED (connect in Health or set INGEST_TOKEN)'}`);
+    if (tokenSource && listeningPort !== 3001) {
       console.warn(` Warning: the capture extension only delivers to port 3001; it cannot reach port ${listeningPort}.`);
     }
     console.log('=======================================================');

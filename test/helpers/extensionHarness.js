@@ -155,6 +155,7 @@ function createChrome({ storage = {}, resources = [TIKTOK_DOCUMENT] } = {}) {
     runtime: {
       lastError: null,
       getURL: (resource) => `${EXTENSION_ORIGIN}/${resource}`,
+      getManifest: () => JSON.parse(fs.readFileSync(path.join(extensionRoot, 'manifest.json'), 'utf8')),
       onMessage: { addListener: (listener) => listeners.message.push(listener) },
       onInstalled: { addListener: (listener) => listeners.installed.push(listener) },
       onStartup: { addListener: (listener) => listeners.startup.push(listener) },
@@ -266,7 +267,12 @@ function createFetch({ server }) {
 function defaultServer() {
   const server = {
     ingest: [],
+    heartbeats: [],
     handle(pathname, options) {
+      if (pathname === '/api/extension/heartbeat') {
+        server.heartbeats.push({ headers: options.headers || {}, body: JSON.parse(options.body) });
+        return server.onHeartbeat(server.heartbeats.at(-1));
+      }
       if (pathname === '/api/ingest') {
         server.ingest.push({
           headers: options.headers || {},
@@ -277,7 +283,8 @@ function defaultServer() {
       if (pathname === '/api/status') return { status: 200, body: {} };
       return { status: 404, body: { error: 'not found' } };
     },
-    onIngest: () => ({ status: 200, body: { success: true, duplicate: false } })
+    onIngest: () => ({ status: 200, body: { success: true, duplicate: false } }),
+    onHeartbeat: () => ({ status: 200, body: { ok: true, session: { exhausted: false } } })
   };
   return server;
 }
@@ -385,7 +392,11 @@ async function loadDevtools({
     );
   };
   const intervals = [];
+  const pageListeners = {};
   const context = createContext(env.chrome, network.fetch, intervals);
+  context.addEventListener = (type, listener) => {
+    (pageListeners[type] = pageListeners[type] || []).push(listener);
+  };
   for (const file of ['shared/stickerPolicy.js', 'shared/capturePayload.js', 'devtools.js']) {
     runFile(context, file);
   }
@@ -406,7 +417,11 @@ async function loadDevtools({
     await settle();
   }
 
-  return { ...env, context, network, messages, finish, navigate, tickIntervals };
+  function closeDevtools() {
+    for (const listener of pageListeners.pagehide || []) listener({});
+  }
+
+  return { ...env, context, network, messages, finish, navigate, tickIntervals, closeDevtools };
 }
 
 function finishedRequest({

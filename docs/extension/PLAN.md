@@ -76,7 +76,7 @@ Popup и панель — тёмная тема со свечением (`#090d1
 8. B8: для заблокированных элементов — `Discard` и `Save file` (Blob-ссылка из страницы расширения, без permission `downloads`), чтобы файл можно было импортировать вручную.
 9. Снизить `maxBodyBytes` с 12 MB до значения по реальным ответам (+запас), чтобы очередь 500 элементов не занимала гигабайты.
 
-### Этап E2. Подключение и честный статус (1–2 дня)
+### Этап E2. Подключение и честный статус (1–2 дня) — выполнен, [E2.md](E2.md)
 
 1. **Pairing без `.env`**: в popover/Health dashboard кнопка `Connect extension` — сервер генерирует токен, хранит его в `output/.ingest-token` (0600, вне Git), показывает один раз для копирования; popup принимает вставку. `INGEST_TOKEN` из `.env` продолжает работать и имеет приоритет. `Disconnect` отзывает токен. Live-capture на сервере включается только этим явным действием.
 2. **Heartbeat в сервер**: пока слушатель активен, background раз в 20 с отправляет `POST /api/extension/heartbeat` (Bearer, только loopback) с состоянием `watching|off|other_site` и размером очереди. Dashboard показывает `Extension · Watching TikTok · 5 s ago`; без свежего heartbeat — прежнее честное `Awaiting DevTools`.

@@ -1,0 +1,68 @@
+# Спецификация расширения Sticker Capture
+
+Состояние: 27 сентября 2026 года, этап E2. Документ — источник истины для текстов статусов; этап E5 дополнит его визуальными правилами.
+
+## 1. Подключение
+
+1. Dashboard → **Health → Capture extension → Connect extension**. Сервер создаёт токен (32 случайных байта, base64url) и сохраняет его в `output/.ingest-token` (права 0600; `output/` не в Git; файл не входит в archive snapshot).
+2. Токен показывается только по запросу (`Show token`) и никогда не передаётся в `/api/status` или WebSocket.
+3. Пользователь вставляет токен в popup (**Connection token**) → **Save and reconnect**.
+4. `INGEST_TOKEN` в `.env` имеет приоритет: пока он задан, dashboard не создаёт и не удаляет токен, а только показывает его по запросу.
+5. **Disconnect** удаляет файл токена; расширение получает `401 INGEST_DISABLED` и показывает `Capture disabled on server`. Библиотека не меняется.
+6. Расширение само токен больше не создаёт; генерация для `.env` осталась в свёрнутом разделе popup `Advanced`.
+
+| Эндпоинт | Доступ | Назначение |
+| --- | --- | --- |
+| `POST /api/extension/pair` | dashboard session | Создать или заменить токен, вернуть его |
+| `POST /api/extension/token` | dashboard session | Показать текущий токен (`404 NOT_PAIRED`, если его нет) |
+| `POST /api/extension/unpair` | dashboard session | Удалить токен (`409 ENV_TOKEN` при токене из `.env`) |
+| `POST /api/extension/heartbeat` | Bearer + origin расширения | Состояние слушателя, счётчики очереди, версия |
+
+## 2. Heartbeat
+
+- Расширение отправляет heartbeat только на loopback и только при наличии токена: при запуске, при смене состояния слушателя, закрытии DevTools, включении/выключении захвата, после обработки очереди (не чаще раза в 2 с при изменениях) и не реже раза в 20 с, пока идут сигналы DevTools; периодический alarm — раз в минуту.
+- Тело: `listenerState`, `queue { count, blocked, paused }`, `pausedReason`, `version`. Никаких URL, байтов или данных страницы. Сервер отвергает неизвестный `listenerState` (400) и обрезает счётчики.
+- Сервер считает расширение на связи 45 с после последнего heartbeat и сам сообщает dashboard, когда связь пропала.
+- Ответ 401/5xx на heartbeat сразу меняет состояние сервера в popup (`Token rejected` и т. д.) — ещё до первого захвата.
+
+## 3. Словарь статусов
+
+Один набор строк для popup, панели DevTools и dashboard. Строки слушателя в `extension/shared/statusText.js` и `frontend/src/lib/captureModel.js` сверяются тестом `test/capture-model.test.js`.
+
+### Слушатель (знает только расширение)
+
+| Состояние | Текст | Кратко в шапке dashboard | Тон |
+| --- | --- | --- | --- |
+| `off` | Capture off | Capture off | pending |
+| `closed` | DevTools not open | DevTools closed | pending |
+| `other_site` | DevTools on another site | Other site | pending |
+| `watching_unconfirmed` | DevTools open, site not confirmed | DevTools open | pending |
+| `watching` | Watching TikTok tab | Watching | ok |
+
+Dashboard показывает состояние слушателя только при свежем heartbeat. Без него — прежние честные `Awaiting DevTools` / `Last asset accepted` с пояснением «No signal from the extension». Слово `Listening` нигде не используется.
+
+### Локальный сервер (popup, панель)
+
+| Состояние | Текст | Тон |
+| --- | --- | --- |
+| `online` | Online | ok |
+| `offline` | Offline | problem |
+| `unauthorized` | Token rejected | problem |
+| `capture_disabled` | Capture disabled on server | problem |
+| `configuration_required` | Setup required | problem |
+| `server_error` | Server error | problem |
+| `unknown` | Not checked | pending |
+
+### Очередь
+
+`Empty` (ok) · `N delivering` (pending) · `N held: budget paused` (pending) · `N (M blocked)` (problem).
+
+### Захват в dashboard (порядок приоритета)
+
+1. Нет токена → `Manual import`, кнопка `Connect extension`.
+2. Бюджет исчерпан → `Budget exhausted`.
+3. Ошибка доставки на сервере → `Delivery failed`.
+4. Свежий heartbeat → `Extension · <текст слушателя>`, «Last signal N s ago»; задержанные захваты делают тон `problem`.
+5. Иначе → `Last asset accepted` или `Awaiting DevTools` + «No signal from the extension».
+
+В шапке на ширине < 1024 px префикс `Local ·` скрывается, подпись обрезается многоточием (128 px, < 760 px — 100 px); полный текст — в popover.

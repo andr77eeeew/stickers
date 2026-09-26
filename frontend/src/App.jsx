@@ -42,6 +42,9 @@ export default function App() {
   const [importOpen, setImportOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [jobsOpen, setJobsOpen] = useState(false);
+  // One-shot request to scroll Health to a section (e.g. from the status popover).
+  const [healthFocus, setHealthFocus] = useState(null);
+  const clearHealthFocus = useCallback(() => setHealthFocus(null), []);
   const [tagsOpen, setTagsOpen] = useState(false);
   const [pendingConvertIds, setPendingConvertIds] = useState(null);
   const [selectionMode, setSelectionMode] = useState(false);
@@ -274,6 +277,10 @@ export default function App() {
   const stickerIds = useMemo(() => new Set(stickers.map((sticker) => sticker.id)), [stickers]);
 
   const navigate = (view) => updateView({ view, id: null, pack: null }, { push: true });
+  const openExtensionConnection = () => {
+    setHealthFocus('capture-extension');
+    navigate('health');
+  };
   const openPacks = (packId = null) => updateView({ view: 'packs', id: null, pack: packId }, { push: true });
   const showNeedsAction = () => updateView({ view: 'library', status: 'action', type: 'all', q: '', page: 1, id: null }, { push: true });
 
@@ -288,7 +295,8 @@ export default function App() {
         onOpenJobs={() => setJobsOpen(true)}
         status={{
           bootstrapState, bootstrapError, socketConnected, captureStatus, sessionInfo,
-          onRetry: retryConnection, onResetBudget: actions.handleResetSession
+          onRetry: retryConnection, onResetBudget: actions.handleResetSession,
+          onConnectExtension: openExtensionConnection
         }}
       />
 
@@ -331,6 +339,9 @@ export default function App() {
             archiving={actions.archiving}
             bootstrapState={bootstrapState}
             libraryTotal={stickers.length}
+            devtools={captureStatus.devtools}
+            focusSection={healthFocus}
+            onFocusHandled={clearHealthFocus}
           />
         </main>
       ) : (

@@ -195,7 +195,7 @@ async function load() {
 
 elements.generateToken.addEventListener('click', () => {
   elements.ingestToken.value = generateToken();
-  showMessage('New token generated. Save it, then copy it to server .env.', false);
+  showMessage('New token generated. Save it, then set it as INGEST_TOKEN in .env and restart the server.', false);
 });
 
 elements.copyToken.addEventListener('click', async () => {
@@ -222,7 +222,7 @@ elements.saveSettings.addEventListener('click', async () => {
     return;
   }
   if (!ingestToken) {
-    showMessage('Bearer token is required.', true);
+    showMessage('Paste the connection token from the dashboard first.', true);
     return;
   }
 
@@ -235,7 +235,13 @@ elements.saveSettings.addEventListener('click', async () => {
     });
     await sendMessage({ type: 'SETTINGS_UPDATED' });
     await refreshStatus('PING_SERVER');
-    showMessage('Settings saved. Use this token as server INGEST_TOKEN.', false);
+    const status = await sendMessage({ type: 'GET_STATUS' });
+    showMessage(
+      status.serverState === 'online'
+        ? 'Connected to the local server.'
+        : `Saved. Local server: ${StatusText.describeServer(status.serverState).text}.`,
+      status.serverState !== 'online'
+    );
   } catch (error) {
     showMessage(error.message || 'Unable to save settings.', true);
   } finally {

@@ -1,59 +1,26 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { countStorageIssues } from '../lib/stickerModel';
+import { describeCapture } from '../lib/captureModel';
 
-// Describes the capture mode only from what the server can actually know.
-const describeCapture = ({ captureStatus, sessionInfo }) => {
-  const devtools = captureStatus.devtools || {};
-  if (devtools.enabled !== true) {
-    return {
-      tone: 'ok',
-      short: 'Manual',
-      title: 'Manual import',
-      detail: 'Local files are the default path and never contact TikTok. Manual imports do not change the DevTools status.'
-    };
-  }
-  if (sessionInfo?.exhausted) {
-    return {
-      tone: 'problem',
-      short: 'Budget exhausted',
-      title: 'DevTools capture budget exhausted',
-      detail: `Limit reached (${sessionInfo.exhaustReason || 'budget'}). Reset only when you intentionally start a new capture session.`
-    };
-  }
-  if (devtools.state === 'local_delivery_failed' || devtools.lastError) {
-    return {
-      tone: 'problem',
-      short: 'Delivery failed',
-      title: 'Local DevTools delivery failed',
-      detail: devtools.lastError || 'The extension could not deliver an already-loaded response body to this computer.'
-    };
-  }
-  if (devtools.state === 'last_asset_accepted') {
-    const at = devtools.lastAcceptedAt || devtools.lastIngestAt;
-    return {
-      tone: 'ok',
-      short: 'Last asset accepted',
-      title: 'Last DevTools asset accepted',
-      detail: `${at ? `Accepted ${new Date(at).toLocaleString()}. ` : ''}The server cannot tell whether the DevTools panel is still open; check the extension popup.`
-    };
-  }
-  return {
-    tone: 'pending',
-    short: 'Awaiting DevTools',
-    title: 'Awaiting opt-in DevTools capture',
-    detail: 'Open DevTools on the TikTok tab before the sticker loads and keep it open; the Sticker Capture panel does not need to be selected. No DOM automation or CDN refetch is used.'
-  };
-};
+const AGO_REFRESH_MS = 5000;
 
 export function StatusPopover({
   bootstrapState, bootstrapError, socketConnected, captureStatus, sessionInfo,
-  onRetry, onResetBudget, onOpenHealth
+  onRetry, onResetBudget, onOpenHealth, onConnectExtension
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
   const buttonRef = useRef(null);
   const panelId = useId();
+  const [now, setNow] = useState(() => Date.now());
+
+  // Keeps "Last signal N s ago" honest while the popover is open.
+  useEffect(() => {
+    if (!open) return undefined;
+    const timer = setInterval(() => setNow(Date.now()), AGO_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -74,7 +41,7 @@ export function StatusPopover({
     };
   }, [open]);
 
-  const capture = describeCapture({ captureStatus, sessionInfo });
+  const capture = describeCapture({ captureStatus, sessionInfo, now });
   const storageIssues = countStorageIssues(captureStatus.storage);
   const devtoolsEnabled = captureStatus.devtools?.enabled === true;
 
@@ -86,7 +53,7 @@ export function StatusPopover({
   } else if (!socketConnected) {
     service = { tone: 'pending', label: 'Updates paused' };
   } else {
-    service = { tone: capture.tone, label: `Local · ${capture.short}` };
+    service = { tone: capture.tone, prefix: 'Local · ', label: capture.short };
   }
 
   return (
@@ -97,10 +64,16 @@ export function StatusPopover({
         className="status-pill"
         aria-expanded={open}
         aria-controls={panelId}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => {
+          setNow(Date.now());
+          setOpen((value) => !value);
+        }}
       >
         <span className={`dot dot-${service.tone}`} aria-hidden="true" />
-        <span className="status-pill-label">{service.label}</span>
+        <span className="status-pill-label">
+          {service.prefix && <span className="status-pill-prefix">{service.prefix}</span>}
+          {service.label}
+        </span>
       </button>
 
       {open && (
@@ -132,6 +105,11 @@ export function StatusPopover({
               {capture.title}
             </p>
             <p className="popover-detail">{capture.detail}</p>
+            {capture.connectable && (
+              <button type="button" className="btn btn-small" onClick={() => { setOpen(false); onConnectExtension(); }}>
+                Connect extension
+              </button>
+            )}
             {devtoolsEnabled && captureStatus.devtools?.lastRejectedAt && (
               <p className="popover-detail">
                 Last rejected {new Date(captureStatus.devtools.lastRejectedAt).toLocaleString()}: {captureStatus.devtools.lastRejectedReason}

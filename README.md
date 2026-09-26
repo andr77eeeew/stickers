@@ -25,7 +25,7 @@ npm run install-all
 Copy-Item .env.example .env
 ```
 
-Для DevTools live-capture задайте в `.env` длинный случайный `INGEST_TOKEN`. Offline/manual import не требует расширения, но dashboard всё равно использует автоматически создаваемую локальную session cookie.
+Для DevTools live-capture подключите расширение в dashboard (**Health → Capture extension**); задавать `INGEST_TOKEN` в `.env` больше не обязательно, но если он задан, он имеет приоритет. Offline/manual import не требует расширения, но dashboard всё равно использует автоматически создаваемую локальную session cookie.
 
 ### Разработка
 
@@ -74,7 +74,7 @@ npm start
 ### Настройка расширения
 
 1. Откройте `chrome://extensions`, включите Developer mode и выберите **Load unpacked** → `extension/`.
-2. Откройте popup расширения. При первой установке token генерируется локально; скопируйте его в `INGEST_TOKEN` файла `.env` и перезапустите backend.
+2. В dashboard откройте **Health → Capture extension** и нажмите **Connect extension**. Сервер создаёт токен и хранит его в `output/.ingest-token` (вне Git и вне архивов); показать его снова можно кнопкой **Show token**, отозвать — **Disconnect**. Вставьте токен в popup расширения (**Connection token**) и нажмите **Save and reconnect**. Альтернатива — `INGEST_TOKEN` в `.env` (раздел **Advanced** в popup); он имеет приоритет над подключением из dashboard.
 3. Оставьте server URL равным `http://127.0.0.1:3001` или `http://localhost:3001`. Расширение доставляет только на порт 3001; при другом `PORT` сервер предупреждает об этом при старте.
 4. Включите **Capture enabled**. Popup показывает состояние слушателя (`Capture off`, `DevTools not open`, `DevTools on another site`, `Watching TikTok tab`), локального сервера (`Online`, `Token rejected`, `Capture disabled on server`, `Offline`…) и очереди.
 
@@ -87,7 +87,7 @@ npm start
 5. Когда исчерпан capture budget сервера, доставка ставится на паузу: захваты хранятся в очереди и уходят сами после **Reset budget** в dashboard. Не перезагружайте чат ради повторного захвата.
 6. Захват, который сервер отклонил (`Held captures` в popup), можно повторить, сохранить файлом для ручного импорта или удалить.
 
-Backend не может достоверно определить, открыт ли DevTools прямо сейчас. Поэтому dashboard показывает `awaiting`, последнее подтверждённое принятие или ошибку локальной доставки, а фактический listener state смотрите в popup расширения. Отклонённый политикой файл (например, аватар) dashboard показывает отдельно от ошибки доставки.
+Сам backend не видит DevTools, поэтому расширение отправляет на localhost короткий heartbeat (состояние слушателя, счётчики очереди, версия — без URL и данных страницы). Пока heartbeat свежий, dashboard показывает то же состояние, что и popup (например `Extension · Watching TikTok tab`, «Last signal 5 s ago»); без него — `Awaiting DevTools` или последнее подтверждённое принятие. Словарь статусов — [docs/extension/SPEC.md](docs/extension/SPEC.md). Отклонённый политикой файл (например, аватар) dashboard показывает отдельно от ошибки доставки.
 
 Расширение не кликает, не скроллит и не изменяет TikTok UI; в manifest нет content script, `debugger`, `tabs` или `webRequest` permissions. Тем не менее live-capture остаётся неофициальной инструментализацией с остаточным account/policy risk. Подробнее: [Account Safety](docs/ACCOUNT_SAFETY.md).
 
@@ -135,6 +135,8 @@ Dashboard сначала вызывает `GET /api/session`; сервер ус�
 | `POST` | `/api/ingest` | Принять bytes от DevTools extension; Bearer token обязателен |
 | `POST` | `/api/import/files` | Локальный ручной импорт media |
 | `POST` | `/api/session/reset` | Начать новый DevTools capture budget |
+| `POST` | `/api/extension/pair`, `/api/extension/token`, `/api/extension/unpair` | Подключить расширение / показать токен / отключить (dashboard session) |
+| `POST` | `/api/extension/heartbeat` | Состояние слушателя от расширения; Bearer token обязателен |
 | `POST` | `/api/library/archive` | Создать неизменяемый snapshot библиотеки |
 | `GET` | `/api/library/archives` | Список архивов из manifest |
 | `POST` | `/api/library/archives/:id/verify` | Read-only проверка SHA-256 архива |
