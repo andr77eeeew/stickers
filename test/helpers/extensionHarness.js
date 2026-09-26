@@ -20,9 +20,13 @@ const WEBP_BYTES = Buffer.from([
 const STICKER_URL =
   'https://p16-tiktok-dm-sticker-sign-sg.ibyteimg.com/obj/video2sticker/demo.awebp?x-signature=secret#frag';
 
+// Lets queued work finish. WebCrypto digests run on the thread pool, so pure
+// setImmediate rounds can outrun them when the whole suite runs in parallel;
+// short real pauses give them time.
 async function settle(rounds = 60) {
   for (let step = 0; step < rounds; step += 1) {
     await new Promise((resolve) => setImmediate(resolve));
+    if (step % 5 === 4) await new Promise((resolve) => setTimeout(resolve, 2));
   }
 }
 
@@ -445,11 +449,12 @@ function finishedRequest({
   mimeType = 'image/webp',
   headers = [],
   body = WEBP_BYTES,
-  encoding = 'base64'
+  encoding = 'base64',
+  requestHeaders = []
 } = {}) {
   const entry = {
     getContentCalls: 0,
-    request: { url, method: 'GET', headers: [{ name: 'Cookie', value: 'sid=secret' }] },
+    request: { url, method: 'GET', headers: [{ name: 'Cookie', value: 'sid=secret' }, ...requestHeaders] },
     response: {
       status,
       headers,

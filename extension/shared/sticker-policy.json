@@ -52,5 +52,11 @@
     "ibyteimg.com",
     "byteimg.com",
     "tiktokv.com"
+  ],
+  "challengeUrlMarkers": [
+    "captcha"
+  ],
+  "challengeHostMarkers": [
+    "verification"
   ]
 }

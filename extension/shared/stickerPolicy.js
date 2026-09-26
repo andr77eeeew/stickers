@@ -86,6 +86,16 @@
         raw.diagnosticHostSuffixes === undefined
           ? []
           : asLowercaseStringArray(raw.diagnosticHostSuffixes, 'diagnosticHostSuffixes')
+      ),
+      challengeUrlMarkers: Object.freeze(
+        raw.challengeUrlMarkers === undefined
+          ? []
+          : asLowercaseStringArray(raw.challengeUrlMarkers, 'challengeUrlMarkers')
+      ),
+      challengeHostMarkers: Object.freeze(
+        raw.challengeHostMarkers === undefined
+          ? []
+          : asLowercaseStringArray(raw.challengeHostMarkers, 'challengeHostMarkers')
       )
     });
   }

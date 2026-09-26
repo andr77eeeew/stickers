@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { countStorageIssues } from '../lib/stickerModel';
-import { describeCapture } from '../lib/captureModel';
+import { describeCapture, describeSession } from '../lib/captureModel';
 
 const AGO_REFRESH_MS = 5000;
 
@@ -105,6 +105,13 @@ export function StatusPopover({
               {capture.title}
             </p>
             <p className="popover-detail">{capture.detail}</p>
+            {capture.warnings?.length > 0 && (
+              <ul className="popover-warnings">
+                {capture.warnings.map((warning) => (
+                  <li key={warning.text} className={`tone-${warning.tone}`}>{warning.text}</li>
+                ))}
+              </ul>
+            )}
             {capture.connectable && (
               <button type="button" className="btn btn-small" onClick={() => { setOpen(false); onConnectExtension(); }}>
                 Connect extension
@@ -117,9 +124,9 @@ export function StatusPopover({
             )}
             {devtoolsEnabled && sessionInfo && (
               <div className="popover-row">
-                <span className="tabular">Session {sessionInfo.captureCount || 0}/{sessionInfo.maxCaptures || '—'}</span>
+                <span className="tabular">Session: {describeSession(sessionInfo, now)?.text || `${sessionInfo.captureCount || 0} captures`}</span>
                 <button type="button" className="btn btn-small" onClick={onResetBudget} disabled={bootstrapState !== 'ready'}>
-                  Reset budget
+                  Start new session
                 </button>
               </div>
             )}

@@ -170,8 +170,10 @@ main:focus { outline: none; }
 .bg-chat-dark .media-unavailable { color: #6b7a8c; }
 
 /* ----- Header ----- */
+/* Above the pack and selection bars (21–22) so the status popover is never
+   covered; below the full-screen inspector layer (25). */
 .app-header {
-  position: sticky; top: 0; z-index: 20; height: var(--header-h);
+  position: sticky; top: 0; z-index: 23; height: var(--header-h);
   display: flex; align-items: center; gap: 24px; padding: 0 var(--gutter);
   background: var(--surface); border-bottom: 1px solid var(--border);
 }
@@ -194,6 +196,7 @@ main:focus { outline: none; }
 .status-pill:hover { border-color: var(--border-strong); color: var(--text); }
 .popover-panel {
   position: absolute; right: 0; top: calc(100% + 8px); width: min(360px, calc(100vw - 32px)); z-index: 30;
+  max-height: calc(100vh - var(--header-h) - 24px); overflow-y: auto;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel);
   box-shadow: 0 12px 32px rgba(17, 24, 32, 0.14); padding: 4px 16px;
 }
@@ -202,6 +205,9 @@ main:focus { outline: none; }
 .popover-panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-2); }
 .popover-value { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; }
 .popover-detail { color: var(--text-2); font-size: 14px; }
+.popover-warnings { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 4px; font-size: 14px; }
+.popover-warnings .tone-problem { color: var(--problem); }
+.popover-warnings .tone-pending { color: var(--warning); }
 .popover-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 14px; }
 .popover-panel .btn { justify-self: start; }
 

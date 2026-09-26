@@ -38,6 +38,25 @@
       </article>
     </section>
 
+    <section class="pacing" aria-labelledby="pacingTitle">
+      <div class="section-header">
+        <h2 id="pacingTitle">Pacing</h2>
+        <strong id="sessionLine" class="tabular">No capture session yet</strong>
+      </div>
+      <ul id="warnings" class="warnings" aria-live="polite"></ul>
+      <details class="checklist">
+        <summary>Safer capture checklist</summary>
+        <ul>
+          <li>Open DevTools in a separate window (⋮ → Dock side → Undock): docked DevTools changes the page size, which a site can notice.</li>
+          <li>Keep “Disable cache” off in the Network panel.</li>
+          <li>Scroll the chat at a normal pace. Do not reload it to capture again; use Capture from Network log.</li>
+          <li>Keep sessions short and take breaks. A new session starts from the dashboard.</li>
+          <li>Stop if TikTok shows a verification check, a rate-limit message or any warning.</li>
+          <li>Use an account you can afford to lose. Manual import of saved files stays the safest path.</li>
+        </ul>
+      </details>
+    </section>
+
     <section class="session">
       <div class="section-header">
         <div>
@@ -73,8 +92,7 @@
 
     <aside>
       Keep DevTools open on the TikTok tab before stickers load; this panel
-      does not need to be selected. Scroll at a normal pace, do not reload the
-      chat to capture again and do not turn on Disable cache.
+      does not need to be selected. Live capture is never ban-safe.
     </aside>
   </main>
   <script src="shared/stickerPolicy.js"></script>

@@ -264,3 +264,47 @@ aside {
   color: #94a3b8;
   overflow-wrap: anywhere;
 }
+
+.pacing {
+  margin-top: 16px;
+  padding: 20px;
+  border: 1px solid #26314c;
+  border-radius: 12px;
+  background: #10182d;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.warnings {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.warnings:empty {
+  display: none;
+}
+
+.checklist {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #cbd5e1;
+}
+
+.checklist summary {
+  cursor: pointer;
+}
+
+.checklist ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+  line-height: 1.5;
+  color: #94a3b8;
+}

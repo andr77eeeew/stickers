@@ -15,8 +15,11 @@ const elements = {
   retryQueue: document.getElementById('retryQueue'),
   message: document.getElementById('message'),
   heldSection: document.getElementById('heldSection'),
-  heldList: document.getElementById('heldList')
+  heldList: document.getElementById('heldList'),
+  sessionLine: document.getElementById('sessionLine'),
+  warnings: document.getElementById('warnings')
 };
+const WARNINGS_SHOWN = 2;
 const TONE_CLASS = Object.freeze({ ok: 'ok', pending: 'warn', problem: 'bad' });
 let heldSignature = '';
 
@@ -94,6 +97,15 @@ function renderStatus(status) {
     StatusText.describeQueue(status.queue, status.pausedReason)
   );
   elements.lastEvent.textContent = status.lastEvent || 'No activity yet.';
+  const session = StatusText.describeSession(status.session, Date.now());
+  setState(elements.sessionLine, session ? session.text : 'No capture session yet', session ? TONE_CLASS[session.tone] : '');
+  const warnings = (status.warnings || []).map(StatusText.describeWarning).filter(Boolean).slice(0, WARNINGS_SHOWN);
+  elements.warnings.replaceChildren(...warnings.map((warning) => {
+    const item = document.createElement('li');
+    item.className = TONE_CLASS[warning.tone];
+    item.textContent = warning.text;
+    return item;
+  }));
 }
 
 function base64ToBlob(contentBase64, mimeType) {

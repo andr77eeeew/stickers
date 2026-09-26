@@ -74,6 +74,10 @@ async function startCapture() {
   if (chrome.devtools.network.onNavigated) {
     chrome.devtools.network.onNavigated.addListener((url) => {
       const site = CapturePipeline.classifySite(url);
+      // Page loads of the TikTok tab count towards the "frequent reloads" warning.
+      if (captureEnabled && site === 'tiktok') {
+        void sendRuntimeMessage({ type: 'SAFETY_SIGNAL', signal: 'navigation' }).catch(() => undefined);
+      }
       if (site === inspectedSite) return;
       inspectedSite = site;
       if (captureEnabled) void reportEvent('site_changed');

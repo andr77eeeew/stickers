@@ -66,6 +66,23 @@ Dashboard показывает состояние слушателя тольк�
 
 Итог «Capture from Network log»: `Found N sticker responses: X sent to the library, Y already in library, …`; без стикеров — объяснение, что журнал содержит только запросы с момента открытия DevTools и что перезагружать чат не нужно.
 
+### Предупреждения о темпе и безопасности
+
+Расширение вычисляет предупреждения и передаёт dashboard только коды и числа; тексты в `statusText.js` и `captureModel.js` совпадают (тест `test/extension/pacing.test.js`). Порядок — от самого серьёзного.
+
+| Код | Условие | Тон | Текст |
+| --- | --- | --- | --- |
+| `challenge` | ресурс с `captcha` в адресе или хост `verification…` на вкладке TikTok, 30 мин | problem | TikTok showed a verification check. Capture was turned off: close DevTools and use TikTok normally for a while. |
+| `session_limit` | бюджет сервера исчерпан | problem | Session limit reached. Captures are kept; after a break, start a new session in the dashboard. |
+| `cache_disabled` | запрос стикера с `no-cache`, 10 мин | problem | “Disable cache” or a hard reload is on: every sticker is downloaded again. Turn it off in the DevTools Network panel. |
+| `session_near_limit` | ≥ 80 % захватов или времени бюджета | pending | Session: N of M captures, X of Y min. Plan a break soon. |
+| `frequent_navigation` | ≥ 3 загрузки вкладки TikTok за 10 мин | pending | The TikTok tab reloaded N times in 10 min. Reloading to capture again adds traffic. |
+| `fast_capture` | ≥ 12 новых стикеров за 2 мин | pending | N new stickers in 2 min. Scroll at a normal pace: fast bulk loading looks unlike normal use. |
+
+Только `challenge` меняет поведение: выключает захват. Сигналы от одного источника отправляются не чаще раза в 30 с; разбор журнала Network сигналов не отправляет.
+
+Сессия: `N of M captures · X of Y min`, до первого нового стикера — `0 of M captures · starts with the first new sticker`, после исчерпания — `Session limit reached`. Кнопка в dashboard — **Start new session**.
+
 ### Очередь
 
 `Empty` (ok) · `N delivering` (pending) · `N held: budget paused` (pending) · `N (M blocked)` (problem).

@@ -188,6 +188,9 @@ let lastIngestRejection = null;
 // whether DevTools is open on a TikTok tab.
 const EXTENSION_HEARTBEAT_STALE_MS = 45_000;
 const EXTENSION_LISTENER_STATES = new Set(['off', 'closed', 'other_site', 'watching_unconfirmed', 'watching']);
+const EXTENSION_WARNING_CODES = new Set([
+  'challenge', 'session_limit', 'cache_disabled', 'session_near_limit', 'frequent_navigation', 'fast_capture'
+]);
 let extensionHeartbeat = null;
 let extensionStaleTimer = null;
 let capturedStickers = [];
@@ -279,7 +282,7 @@ function broadcast(message) {
 
 function extensionSnapshot() {
   if (!extensionHeartbeat) {
-    return { connected: false, lastSeenAt: null, listenerState: null, queue: null, pausedReason: null, version: null };
+    return { connected: false, lastSeenAt: null, listenerState: null, queue: null, pausedReason: null, warnings: [], version: null };
   }
   return {
     connected: Date.now() - extensionHeartbeat.receivedAt < EXTENSION_HEARTBEAT_STALE_MS,
@@ -287,6 +290,7 @@ function extensionSnapshot() {
     listenerState: extensionHeartbeat.listenerState,
     queue: extensionHeartbeat.queue,
     pausedReason: extensionHeartbeat.pausedReason,
+    warnings: extensionHeartbeat.warnings,
     version: extensionHeartbeat.version
   };
 }
@@ -771,6 +775,17 @@ function recordExtensionHeartbeat(body) {
       paused: sanitizeQueueCount(queue.paused)
     },
     pausedReason: /^[a-z_]{1,64}$/.test(String(body.pausedReason || '')) ? body.pausedReason : null,
+    // Only known codes and small numbers; the texts live in the dashboard.
+    warnings: (Array.isArray(body.warnings) ? body.warnings : [])
+      .filter((warning) => warning && EXTENSION_WARNING_CODES.has(warning.code))
+      .slice(0, EXTENSION_WARNING_CODES.size)
+      .map((warning) => ({
+        code: warning.code,
+        count: sanitizeQueueCount(warning.count),
+        max: sanitizeQueueCount(warning.max),
+        minutes: sanitizeQueueCount(warning.minutes),
+        maxMinutes: sanitizeQueueCount(warning.maxMinutes)
+      })),
     version: /^[0-9][0-9.]{0,19}$/.test(String(body.version || '')) ? body.version : null
   };
   const previous = extensionSnapshot();
@@ -778,6 +793,7 @@ function recordExtensionHeartbeat(body) {
     !previous.connected ||
     previous.listenerState !== next.listenerState ||
     previous.pausedReason !== next.pausedReason ||
+    JSON.stringify(previous.warnings) !== JSON.stringify(next.warnings) ||
     JSON.stringify(previous.queue) !== JSON.stringify(next.queue);
   extensionHeartbeat = next;
   clearTimeout(extensionStaleTimer);

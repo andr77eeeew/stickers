@@ -444,7 +444,8 @@ test('server heartbeat reports listener state with the bearer token only when it
   assert.deepEqual(beats(), ['closed'], 'bootstrap announces the extension');
   const [first] = harness.server.heartbeats;
   assert.equal(first.headers.Authorization, 'Bearer test-ingest-token');
-  assert.deepEqual(Object.keys(first.body).sort(), ['listenerState', 'pausedReason', 'queue', 'version']);
+  assert.deepEqual(Object.keys(first.body).sort(), ['listenerState', 'pausedReason', 'queue', 'version', 'warnings']);
+  assert.equal(first.body.warnings.length, 0);
   assert.deepEqual(first.body.queue, { count: 0, blocked: 0, paused: 0 });
   assert.match(first.body.version, /^\d+\.\d+\.\d+$/);
 

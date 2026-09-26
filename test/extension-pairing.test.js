@@ -148,6 +148,20 @@ test('dashboard pairing enables capture, heartbeats reach the dashboard, unpair 
     assert.equal(broadcast.devtools.extension.version, '2.0.0');
     assert.equal(JSON.stringify(broadcast).includes(token), false);
 
+    const warned = await heartbeat(token, {
+      listenerState: 'watching',
+      warnings: [
+        { code: 'fast_capture', count: 14 },
+        { code: '<img src=x>', count: 1 },
+        { code: 'session_near_limit', count: 1e12, max: -3, minutes: 'x' }
+      ]
+    });
+    assert.equal(warned.status, 200);
+    assert.deepEqual((await sandbox.request('/api/status')).body.devtools.extension.warnings, [
+      { code: 'fast_capture', count: 14, max: 0, minutes: 0, maxMinutes: 0 },
+      { code: 'session_near_limit', count: 100000, max: 0, minutes: 0, maxMinutes: 0 }
+    ], 'only known codes and bounded numbers are kept');
+
     const invalid = await heartbeat(token, { listenerState: 'hacking' });
     assert.equal(invalid.status, 400);
     const wrongToken = await heartbeat('wrong-token', { listenerState: 'watching' });

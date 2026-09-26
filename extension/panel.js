@@ -16,8 +16,11 @@ const elements = {
   feedEmpty: document.getElementById('feedEmpty'),
   diagnosticsBox: document.getElementById('diagnosticsBox'),
   diagnosticsSummary: document.getElementById('diagnosticsSummary'),
-  diagnostics: document.getElementById('diagnostics')
+  diagnostics: document.getElementById('diagnostics'),
+  sessionLine: document.getElementById('sessionLine'),
+  warnings: document.getElementById('warnings')
 };
+let warningsSignature = '';
 let feedSignature = '';
 let diagnosticsSignature = '';
 const TONE_CLASS = Object.freeze({ ok: 'ok', pending: 'warn', problem: 'bad' });
@@ -72,6 +75,22 @@ function render(status) {
   elements.lastEvent.textContent =
     status.lastEvent || 'No capture events yet.';
   renderEvents(status.events);
+  renderPacing(status);
+}
+
+function renderPacing(status) {
+  const session = StatusText.describeSession(status.session, Date.now());
+  setState(elements.sessionLine, session ? session.text : 'No capture session yet', session ? TONE_CLASS[session.tone] : '');
+  const warnings = (status.warnings || []).map(StatusText.describeWarning).filter(Boolean);
+  const signature = warnings.map((warning) => warning.text).join('|');
+  if (signature === warningsSignature) return;
+  warningsSignature = signature;
+  elements.warnings.replaceChildren(...warnings.map((warning) => {
+    const item = document.createElement('li');
+    item.className = TONE_CLASS[warning.tone];
+    item.textContent = warning.text;
+    return item;
+  }));
 }
 
 function libraryLink(serverUrl, stickerId) {

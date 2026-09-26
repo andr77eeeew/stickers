@@ -111,6 +111,45 @@
     return { reason, pattern: `${hostPattern}${pathPattern}` };
   }
 
+  function headerValue(headers, name) {
+    const header = (headers || []).find(
+      (entry) => entry && typeof entry.name === 'string' && entry.name.toLowerCase() === name
+    );
+    return header && typeof header.value === 'string' ? header.value.toLowerCase() : '';
+  }
+
+  // Account-safety signals visible in DevTools metadata:
+  // - challenge: TikTok loads a verification (CAPTCHA) resource;
+  // - cache_disabled: sticker images are requested with no-cache, which is
+  //   what DevTools "Disable cache" or a hard reload does.
+  function detectSafetySignals(request, policy, isCdnImage) {
+    const signals = [];
+    let parsed;
+    try {
+      parsed = new URL(request && request.request && request.request.url);
+    } catch {
+      return signals;
+    }
+    const host = parsed.hostname.toLowerCase();
+    const where = `${host}${parsed.pathname.toLowerCase()}`;
+    if (
+      (policy.challengeUrlMarkers || []).some((marker) => where.includes(marker)) ||
+      (policy.challengeHostMarkers || []).some((marker) => host.includes(marker))
+    ) {
+      signals.push('challenge');
+    }
+    if (isCdnImage) {
+      const headers = request.request.headers;
+      if (
+        headerValue(headers, 'pragma').includes('no-cache') ||
+        headerValue(headers, 'cache-control').includes('no-cache')
+      ) {
+        signals.push('cache_disabled');
+      }
+    }
+    return signals;
+  }
+
   function makeThumbnail(contentBase64, mimeType) {
     if (
       typeof document === 'undefined' ||
@@ -151,7 +190,23 @@
   }
 
   // send(message) → Promise<response>; lastError() → chrome.runtime.lastError.
+  const SIGNAL_INTERVAL_MS = 30000;
+
   function createPipeline({ policy, send, lastError, origin }) {
+    const lastSignalAt = {};
+
+    // Only the live listener reports safety signals; the Network log replays
+    // the past and would repeat them.
+    async function reportSignals(request, isCdnImage) {
+      if (origin !== 'live') return;
+      const now = Date.now();
+      for (const signal of detectSafetySignals(request, policy, isCdnImage)) {
+        if (now - (lastSignalAt[signal] || 0) < SIGNAL_INTERVAL_MS) continue;
+        lastSignalAt[signal] = now;
+        await send({ type: 'SAFETY_SIGNAL', signal }).catch(() => undefined);
+      }
+    }
+
     function report(kind, reason) {
       return send({ type: 'DEVTOOLS_EVENT', kind, reason }).catch(() => undefined);
     }
@@ -168,15 +223,19 @@
           ? request.request.url
           : '';
       const response = request && request.response;
+      const responseMime = getResponseMimeType(response);
+      const resource = StickerPolicy.classifyStickerResource(requestUrl, responseMime, policy);
+      const nearMiss = resource.allowed
+        ? null
+        : describeNearMiss(requestUrl, responseMime, resource.reason, policy);
+      await reportSignals(request, resource.allowed || Boolean(nearMiss));
+
       const status = Number(response && response.status);
       if (Number.isFinite(status) && (status < 200 || status >= 400)) {
         return { outcome: 'ignored' };
       }
 
-      const responseMime = getResponseMimeType(response);
-      const resource = StickerPolicy.classifyStickerResource(requestUrl, responseMime, policy);
       if (!resource.allowed) {
-        const nearMiss = describeNearMiss(requestUrl, responseMime, resource.reason, policy);
         if (!nearMiss) return { outcome: 'ignored' };
         await reportNearMiss(nearMiss);
         return { outcome: 'near_miss', reason: resource.reason };
@@ -265,6 +324,7 @@
     classifySite,
     detectInspectedSite,
     describeNearMiss,
+    detectSafetySignals,
     createPipeline,
     summarize
   };

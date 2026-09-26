@@ -91,6 +91,58 @@
     return `Found ${summary.stickers} sticker response${summary.stickers === 1 ? '' : 's'}: ${parts.join(', ')}.`;
   }
 
+  // Pacing and account-safety warnings. The dashboard renders the same codes
+  // with the same texts (frontend/src/lib/captureModel.js).
+  const WARNING_CODES = Object.freeze([
+    'challenge',
+    'session_limit',
+    'cache_disabled',
+    'session_near_limit',
+    'frequent_navigation',
+    'fast_capture'
+  ]);
+
+  function describeWarning(warning) {
+    const count = Number(warning && warning.count) || 0;
+    switch (warning && warning.code) {
+      case 'challenge':
+        return { tone: 'problem', text: 'TikTok showed a verification check. Capture was turned off: close DevTools and use TikTok normally for a while.' };
+      case 'session_limit':
+        return { tone: 'problem', text: 'Session limit reached. Captures are kept; after a break, start a new session in the dashboard.' };
+      case 'cache_disabled':
+        return { tone: 'problem', text: '“Disable cache” or a hard reload is on: every sticker is downloaded again. Turn it off in the DevTools Network panel.' };
+      case 'session_near_limit':
+        return { tone: 'pending', text: `Session: ${count} of ${warning.max} captures, ${warning.minutes} of ${warning.maxMinutes} min. Plan a break soon.` };
+      case 'frequent_navigation':
+        return { tone: 'pending', text: `The TikTok tab reloaded ${count} times in 10 min. Reloading to capture again adds traffic.` };
+      case 'fast_capture':
+        return { tone: 'pending', text: `${count} new stickers in 2 min. Scroll at a normal pace: fast bulk loading looks unlike normal use.` };
+      default:
+        return null;
+    }
+  }
+
+  function describeSession(session, now) {
+    if (!session || !session.maxCaptures) return null;
+    const startedAt = Date.parse(session.startedAt || '');
+    const minutes = Number.isFinite(startedAt)
+      ? Math.min(Math.round(session.maxMs / 60000), Math.floor((now - startedAt) / 60000))
+      : 0;
+    const maxMinutes = Math.round((Number(session.maxMs) || 0) / 60000);
+    const used = Math.max(
+      (Number(session.captureCount) || 0) / session.maxCaptures,
+      Number.isFinite(startedAt) && session.maxMs ? (now - startedAt) / session.maxMs : 0
+    );
+    return {
+      tone: session.exhausted ? 'problem' : used >= 0.8 ? 'pending' : 'ok',
+      text: session.exhausted
+        ? 'Session limit reached'
+        : Number.isFinite(startedAt)
+          ? `${session.captureCount} of ${session.maxCaptures} captures · ${minutes} of ${maxMinutes} min`
+          : `0 of ${session.maxCaptures} captures · starts with the first new sticker`
+    };
+  }
+
   const EXTENSIONS = Object.freeze({
     'image/webp': 'webp',
     'image/png': 'png',
@@ -116,6 +168,9 @@
     describeQueue,
     describeFeedItem,
     describeLogSummary,
+    WARNING_CODES,
+    describeWarning,
+    describeSession,
     heldFileName,
     formatBytesFromBase64
   };

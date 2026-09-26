@@ -57,7 +57,7 @@ test('budget and delivery problems outrank the listener state', async () => {
   const extension = { connected: true, listenerState: 'watching', lastSeenAt: seen(1) };
   assert.equal(
     describeCapture({ captureStatus: status({ extension }), sessionInfo: { exhausted: true }, now: NOW }).short,
-    'Budget exhausted'
+    'Session limit'
   );
   assert.equal(
     describeCapture({ captureStatus: status({ extension, lastError: 'disk full', state: 'local_delivery_failed' }), now: NOW }).short,

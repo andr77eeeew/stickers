@@ -30,6 +30,17 @@ const DIAGNOSTIC_EXAMPLES = 3;
 const KNOWN_KEY = 'knownCaptures';
 const KNOWN_LIMIT = 2000;
 const CAPTURE_ORIGINS = ['live', 'network_log'];
+// Pacing thresholds for account-safety warnings (docs/extension/SPEC.md).
+const PACING = Object.freeze({
+  challengeMs: 30 * 60 * 1000,
+  cacheDisabledMs: 10 * 60 * 1000,
+  navigationWindowMs: 10 * 60 * 1000,
+  navigationCount: 3,
+  captureWindowMs: 2 * 60 * 1000,
+  captureCount: 12,
+  nearLimitRatio: 0.8
+});
+const SAFETY_SIGNALS = ['challenge', 'cache_disabled', 'navigation'];
 const STICKER_ID_PATTERN = /^[a-f0-9]{64}$/;
 
 const BADGE_COLORS = Object.freeze({
@@ -50,6 +61,7 @@ const DEFAULT_STATUS = Object.freeze({
   lastError: null,
   lastEvent: 'Extension initialized',
   events: [],
+  safety: { challengeAt: null, cacheDisabledAt: null, navigations: [], captures: [] },
   counters: {
     observed: 0,
     queued: 0,
@@ -130,6 +142,7 @@ async function readStatus() {
     ...status,
     listeners: { ...(status.listeners || {}) },
     events: Array.isArray(status.events) ? status.events : [],
+    safety: { ...DEFAULT_STATUS.safety, ...(status.safety || {}) },
     counters: {
       ...DEFAULT_STATUS.counters,
       ...(status.counters || {})
@@ -401,7 +414,12 @@ async function enqueueCapture(rawPayload, meta) {
     { touch: true }
   );
   await patchStatus(
-    {},
+    (current) => ({
+      safety: {
+        ...current.safety,
+        captures: recentTimes(current.safety.captures, PACING.captureWindowMs, now).concat(now)
+      }
+    }),
     { observed: 1, queued: 1 },
     paused
       ? { tone: 'warning', text: 'Captured and held: delivery is paused' }
@@ -638,6 +656,87 @@ function processQueue() {
   return deliveryPromise;
 }
 
+function recentTimes(times, windowMs, now) {
+  return (Array.isArray(times) ? times : []).filter((time) => now - time < windowMs);
+}
+
+function sessionWarning(session, now) {
+  if (!session || !session.maxCaptures) return null;
+  if (session.exhausted) return { code: 'session_limit' };
+  const startedAt = Date.parse(session.startedAt || '');
+  if (!Number.isFinite(startedAt)) return null;
+  const elapsed = now - startedAt;
+  const nearCount = session.captureCount >= session.maxCaptures * PACING.nearLimitRatio;
+  const nearTime = elapsed >= session.maxMs * PACING.nearLimitRatio;
+  if (!nearCount && !nearTime) return null;
+  return {
+    code: 'session_near_limit',
+    count: session.captureCount,
+    max: session.maxCaptures,
+    minutes: Math.min(Math.round(session.maxMs / 60000), Math.floor(elapsed / 60000)),
+    maxMinutes: Math.round(session.maxMs / 60000)
+  };
+}
+
+// Most severe first; see extension/shared/statusText.js for the texts.
+function computeWarnings(status, now) {
+  const safety = status.safety;
+  const warnings = [];
+  if (safety.challengeAt && now - safety.challengeAt < PACING.challengeMs) {
+    warnings.push({ code: 'challenge' });
+  }
+  const session = sessionWarning(status.session, now);
+  if (session && session.code === 'session_limit') warnings.push(session);
+  if (safety.cacheDisabledAt && now - safety.cacheDisabledAt < PACING.cacheDisabledMs) {
+    warnings.push({ code: 'cache_disabled' });
+  }
+  if (session && session.code === 'session_near_limit') warnings.push(session);
+  const navigations = recentTimes(safety.navigations, PACING.navigationWindowMs, now).length;
+  if (navigations >= PACING.navigationCount) {
+    warnings.push({ code: 'frequent_navigation', count: navigations });
+  }
+  const captures = recentTimes(safety.captures, PACING.captureWindowMs, now).length;
+  if (captures >= PACING.captureCount) {
+    warnings.push({ code: 'fast_capture', count: captures });
+  }
+  return warnings;
+}
+
+async function recordSafetySignal(message) {
+  const signal = SAFETY_SIGNALS.includes(message.signal) ? message.signal : null;
+  if (!signal) return;
+  const now = Date.now();
+  if (signal === 'navigation') {
+    await patchStatus((current) => ({
+      safety: {
+        ...current.safety,
+        navigations: recentTimes(current.safety.navigations, PACING.navigationWindowMs, now).concat(now)
+      }
+    }));
+    return;
+  }
+  if (signal === 'cache_disabled') {
+    const status = await readStatus();
+    const fresh = !status.safety.cacheDisabledAt || now - status.safety.cacheDisabledAt >= PACING.cacheDisabledMs;
+    await patchStatus(
+      (current) => ({ safety: { ...current.safety, cacheDisabledAt: now } }),
+      undefined,
+      fresh ? { tone: 'problem', text: 'Stickers are requested with no-cache: turn off “Disable cache” in DevTools.' } : undefined
+    );
+    return;
+  }
+  // A verification check is the clearest sign to stop: capture turns off.
+  const settings = await getSettings();
+  await patchStatus(
+    (current) => ({ safety: { ...current.safety, challengeAt: now } }),
+    undefined,
+    settings.captureEnabled
+      ? { tone: 'problem', text: 'TikTok showed a verification check: capture turned off.' }
+      : undefined
+  );
+  if (settings.captureEnabled) await storageSet({ captureEnabled: false });
+}
+
 function computeListenerState(settings, status, now) {
   if (!settings.captureEnabled) return 'off';
   const live = Object.values(status.listeners).filter(
@@ -664,6 +763,7 @@ async function getPublicStatus() {
       settings.serverUrl || DeliveryPolicy.DEFAULT_SERVER_URL,
     hasToken: Boolean(settings.ingestToken),
     listenerState: computeListenerState(settings, status, Date.now()),
+    warnings: computeWarnings(status, Date.now()),
     serverState: status.serverState,
     pausedReason: status.pausedReason,
     session: status.session,
@@ -752,7 +852,14 @@ async function sendServerHeartbeat(force) {
     blocked: status.queue.blocked,
     paused: status.queue.paused
   };
-  const key = JSON.stringify([status.listenerState, queue, status.pausedReason]);
+  const warnings = status.warnings.map((warning) => ({
+    code: warning.code,
+    count: warning.count,
+    max: warning.max,
+    minutes: warning.minutes,
+    maxMinutes: warning.maxMinutes
+  }));
+  const key = JSON.stringify([status.listenerState, queue, status.pausedReason, warnings.map(({ code }) => code)]);
   const now = Date.now();
   const elapsed = now - lastServerHeartbeat.at;
   const due =
@@ -775,6 +882,7 @@ async function sendServerHeartbeat(force) {
           listenerState: status.listenerState,
           queue,
           pausedReason: status.pausedReason,
+          warnings,
           version: chrome.runtime.getManifest().version
         })
       }
@@ -939,6 +1047,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     operation = clearFeed().then(() => ({ ok: true }));
   } else if (message.type === 'CAPTURE_DIAGNOSTIC') {
     operation = recordDiagnostic(message).then(() => ({ ok: true }));
+  } else if (message.type === 'SAFETY_SIGNAL') {
+    operation = recordSafetySignal(message).then(() => {
+      void sendServerHeartbeat(message.signal !== 'navigation');
+      return { ok: true };
+    });
   } else if (message.type === 'DEVTOOLS_CLOSED') {
     operation = forgetListener(message).then(() => {
       void sendServerHeartbeat(true);
