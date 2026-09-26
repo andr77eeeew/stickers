@@ -6,6 +6,7 @@ import {
 import { StickerMedia } from './StickerMedia';
 import { usePrefersReducedMotion } from '../hooks/usePrefersReducedMotion';
 import { TagEditor } from './TagEditor';
+import { PackInspectorSection } from './PackInspectorSection';
 import {
   getImportName, getOutputMediaPath, getPersistedRange, getShortId, getStickerDuration,
   getStickerState, getTelegramCheck, getUserTags, hasPersistedRange, isOriginalMissing,
@@ -126,7 +127,7 @@ function SliceControl({ sticker, selectedStartTimes, setSelectedStartTimes }) {
 
 export function StickerInspector({
   sticker, loading, onClose, handleConvert, openEditor, triggerBrowserDownload,
-  handleSaveTags, selectedStartTimes, setSelectedStartTimes, copyText
+  handleSaveTags, selectedStartTimes, setSelectedStartTimes, copyText, packSection
 }) {
   const headingRef = useRef(null);
   const state = sticker ? getStickerState(sticker) : null;
@@ -259,6 +260,8 @@ export function StickerInspector({
           <p className="action-note">{describeFailure(sticker.error)}</p>
         )}
       </div>
+
+      {packSection && <PackInspectorSection sticker={sticker} {...packSection} />}
 
       <SliceControl
         sticker={sticker}

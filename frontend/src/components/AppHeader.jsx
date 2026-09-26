@@ -4,6 +4,7 @@ import { JobCenterButton } from './JobCenter';
 
 const NAV_ITEMS = [
   { view: 'library', label: 'Library' },
+  { view: 'packs', label: 'Packs' },
   { view: 'health', label: 'Health' }
 ];
 

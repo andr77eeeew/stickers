@@ -28,7 +28,7 @@ function Segmented({ label, options, value, onChange, className = '' }) {
 }
 
 export const LibraryToolbar = forwardRef(function LibraryToolbar({
-  viewState, counts, onChange, preferences, setPreference, selectionMode, onToggleSelectionMode
+  viewState, counts, onChange, preferences, setPreference, selectionMode, onToggleSelectionMode, hasPacks
 }, searchRef) {
   const statusChips = [
     { value: 'all', label: 'All', count: counts.all },
@@ -75,6 +75,17 @@ export const LibraryToolbar = forwardRef(function LibraryToolbar({
             </button>
           ))}
         </div>
+
+        {(hasPacks || viewState.unpacked) && (
+          <button
+            type="button"
+            className="chip"
+            aria-pressed={viewState.unpacked}
+            onClick={() => onChange({ unpacked: !viewState.unpacked, page: 1 })}
+          >
+            Not in a pack
+          </button>
+        )}
 
         <Segmented
           label="Type"

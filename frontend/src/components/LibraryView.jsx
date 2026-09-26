@@ -23,12 +23,13 @@ function ServiceUnavailable({ error, onRetry }) {
 export function LibraryView({
   catalogue, viewState, updateView, openSticker, preferences, setPreference,
   attention, attentionSamples, bootstrapState, bootstrapError, onRetry, onImport, searchRef,
-  selectionMode, onToggleSelectionMode, selectedIds, onToggleSelected, queuedIds, onConvertAttention, attentionConvertible
+  selectionMode, onToggleSelectionMode, selectedIds, onToggleSelected, queuedIds, onConvertAttention, attentionConvertible,
+  membership, hasPacks, packBar
 }) {
   const gridRef = useRef(null);
   const { items, total, page, pageCount, counts, libraryTotal } = catalogue;
   const pageSize = preferences.density === 'dense' ? 48 : 24;
-  const hasFilters = Boolean(viewState.q) || viewState.type !== 'all' || viewState.status !== 'all';
+  const hasFilters = Boolean(viewState.q) || viewState.type !== 'all' || viewState.status !== 'all' || viewState.unpacked;
 
   const goToPage = (nextPage) => {
     updateView({ page: nextPage }, { push: true });
@@ -56,7 +57,7 @@ export function LibraryView({
   const showSkeleton = bootstrapState === 'loading' && libraryTotal === 0;
 
   return (
-    <div className="library-main">
+    <div className={`library-main ${packBar ? 'has-pack-bar' : ''}`}>
       <h1 className="sr-only">Sticker library</h1>
 
       {!showUnavailable && viewState.status !== 'action' && (
@@ -78,6 +79,7 @@ export function LibraryView({
         setPreference={setPreference}
         selectionMode={selectionMode}
         onToggleSelectionMode={onToggleSelectionMode}
+        hasPacks={hasPacks}
       />
 
       {showUnavailable ? (
@@ -103,11 +105,12 @@ export function LibraryView({
             {[
               viewState.q && `Search “${viewState.q}”`,
               viewState.status !== 'all' && `status: ${viewState.status === 'action' ? 'needs action' : viewState.status}`,
-              viewState.type !== 'all' && `type: ${viewState.type}`
+              viewState.type !== 'all' && `type: ${viewState.type}`,
+              viewState.unpacked && 'not in a pack'
             ].filter(Boolean).join(' · ')}
           </p>
           {hasFilters && (
-            <button type="button" className="btn" onClick={() => updateView({ q: '', type: 'all', status: 'all', page: 1 })}>
+            <button type="button" className="btn" onClick={() => updateView({ q: '', type: 'all', status: 'all', unpacked: false, page: 1 })}>
               Clear filters
             </button>
           )}
@@ -131,6 +134,7 @@ export function LibraryView({
                 checked={selectedIds.has(sticker.id)}
                 onToggle={onToggleSelected}
                 queued={queuedIds.has(sticker.id)}
+                packEntry={membership.get(sticker.id)}
               />
             ))}
           </ul>
@@ -153,6 +157,7 @@ export function LibraryView({
           </nav>
         </>
       )}
+      {packBar}
     </div>
   );
 }

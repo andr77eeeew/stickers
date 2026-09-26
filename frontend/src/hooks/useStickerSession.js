@@ -17,6 +17,8 @@ export function useStickerSession() {
   // Batch jobs live in server memory; the scope tells the UI how long history lasts.
   const [jobs, setJobs] = useState([]);
   const [jobHistory, setJobHistory] = useState({ scope: null, serverStartedAt: null });
+  // Packs are stored by the server; every change arrives as a full snapshot.
+  const [packState, setPackState] = useState({ packs: [], activePackId: null, loadError: null, loaded: false });
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const mountedRef = useRef(false);
@@ -59,6 +61,9 @@ export function useStickerSession() {
             setStickers(data?.stickers || []);
             setJobs(Array.isArray(data?.jobs) ? data.jobs : []);
             setJobHistory({ scope: data?.historyScope || null, serverStartedAt: data?.serverStartedAt || null });
+            if (data?.packs) setPackState({ ...data.packs, loaded: true });
+          } else if (type === 'packs_update') {
+            setPackState({ ...data, loaded: true });
           } else if (type === 'job_update') {
             setJobs((previous) => upsertJob(previous, data));
           } else if (type === 'status' || type === 'capture_status') {
@@ -146,6 +151,7 @@ export function useStickerSession() {
     sessionInfo, setSessionInfo,
     outputPaths, socketConnected,
     jobs, setJobs, jobHistory,
+    packState, setPackState,
     retryConnection: () => bootstrapRef.current?.()
   };
 }

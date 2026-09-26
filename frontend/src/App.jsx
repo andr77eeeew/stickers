@@ -5,6 +5,7 @@ import { useStickerActions } from './hooks/useStickerActions';
 import { useManualImport } from './hooks/useManualImport';
 import { useViewState } from './hooks/useViewState';
 import { usePreferences } from './hooks/usePreferences';
+import { usePacks } from './hooks/usePacks';
 import { AppHeader } from './components/AppHeader';
 import { LibraryView } from './components/LibraryView';
 import { StickerInspector } from './components/StickerInspector';
@@ -15,10 +16,13 @@ import { JobCenter } from './components/JobCenter';
 import { SelectionBar } from './components/SelectionBar';
 import { BatchTagsDialog } from './components/BatchTagsDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import { PacksView } from './components/PacksView';
+import { PackBar } from './components/PackBar';
 import {
   PAGE_SIZE, PAGE_SIZE_DENSE, getStickerState, isOriginalMissing, needsAction, selectCatalogue, summarizeAttention
 } from './lib/stickerModel';
 import { describeFinishedJob, getQueuedStickerIds } from './lib/jobModel';
+import { PACK_LIMITS, getMembership, getPackKind, stickerKind } from './lib/packModel';
 
 // One-click batch conversions above this size ask for confirmation first.
 const LARGE_BATCH_CONFIRM = 10;
@@ -30,7 +34,7 @@ export default function App() {
   const {
     stickers, setStickers, bootstrapState, bootstrapError, captureStatus, setCaptureStatus,
     sessionInfo, setSessionInfo, outputPaths, socketConnected, retryConnection,
-    jobs, setJobs, jobHistory
+    jobs, setJobs, jobHistory, packState, setPackState
   } = session;
   const { viewState, updateView, openSticker, closeSticker } = useViewState();
   const { preferences, setPreference } = usePreferences();
@@ -63,11 +67,18 @@ export default function App() {
   });
   const importer = useManualImport({ bootstrapState, setStickers, showToast, startConvertJob: actions.startConvertJob });
   const { handleManualFiles } = importer;
+  const packActions = usePacks({ packState, setPackState, showToast });
+  const activePack = packState.packs.find((pack) => pack.id === packState.activePackId) || null;
+  const membership = useMemo(
+    () => getMembership(packState.packs, packState.activePackId),
+    [packState.packs, packState.activePackId]
+  );
+  const packedIds = useMemo(() => new Set(membership.keys()), [membership]);
 
   const pageSize = preferences.density === 'dense' ? PAGE_SIZE_DENSE : PAGE_SIZE;
   const catalogue = useMemo(
-    () => selectCatalogue(stickers, { ...viewState, pageSize }),
-    [stickers, viewState, pageSize]
+    () => selectCatalogue(stickers, { ...viewState, pageSize, packedIds }),
+    [stickers, viewState, pageSize, packedIds]
   );
   const attention = useMemo(() => summarizeAttention(stickers), [stickers]);
   const attentionSamples = useMemo(() => stickers.filter(needsAction).slice(0, 5), [stickers]);
@@ -156,6 +167,34 @@ export default function App() {
     }
   };
 
+  // Adds the selection in page order; stickers of the other format or over the
+  // pack limit are skipped and reported, never silently dropped.
+  const addSelectedToPack = async () => {
+    if (!activePack) return;
+    const ordered = [...selectedIds].map((id) => stickersById.get(id)).filter(Boolean);
+    const present = new Set(activePack.items.map((item) => item.stickerId));
+    const fresh = ordered.filter((sticker) => !present.has(sticker.id));
+    const kind = getPackKind(activePack, stickersById) || (fresh[0] ? stickerKind(fresh[0]) : null);
+    const compatible = fresh.filter((sticker) => stickerKind(sticker) === kind);
+    const room = Math.max(0, PACK_LIMITS.maxStickers - activePack.items.length);
+    const toAdd = compatible.slice(0, room).map((sticker) => sticker.id);
+    const notes = [
+      ordered.length - fresh.length && `${ordered.length - fresh.length} already in it`,
+      fresh.length - compatible.length && `${fresh.length - compatible.length} of the other format`,
+      compatible.length - toAdd.length && `${compatible.length - toAdd.length} over the ${PACK_LIMITS.maxStickers} limit`
+    ].filter(Boolean);
+    try {
+      if (toAdd.length) await packActions.addStickers(activePack.id, toAdd);
+      showToast(`Added ${toAdd.length} to “${activePack.title}”${notes.length ? `; skipped ${notes.join(', ')}` : ''}.${toAdd.length ? ' Give each an emoji in Packs.' : ''}`, toAdd.length ? 'ok' : 'error');
+      if (toAdd.length) {
+        setSelectedIds(new Set());
+        setSelectionMode(false);
+      }
+    } catch (error) {
+      showToast(`Could not add to the pack: ${error.message}`, 'error');
+    }
+  };
+
   const selectedSticker = viewState.id ? stickers.find((sticker) => sticker.id === viewState.id) || null : null;
   const inspectorOpen = viewState.view === 'library' && Boolean(viewState.id);
 
@@ -234,7 +273,8 @@ export default function App() {
   }, [updateView]);
   const stickerIds = useMemo(() => new Set(stickers.map((sticker) => sticker.id)), [stickers]);
 
-  const navigate = (view) => updateView({ view, id: null }, { push: true });
+  const navigate = (view) => updateView({ view, id: null, pack: null }, { push: true });
+  const openPacks = (packId = null) => updateView({ view: 'packs', id: null, pack: packId }, { push: true });
   const showNeedsAction = () => updateView({ view: 'library', status: 'action', type: 'all', q: '', page: 1, id: null }, { push: true });
 
   return (
@@ -262,6 +302,19 @@ export default function App() {
             selectedStartTimes={selectedStartTimes}
             setSelectedStartTimes={setSelectedStartTimes}
             showToast={showToast}
+          />
+        </main>
+      ) : viewState.view === 'packs' ? (
+        <main id="main-content" className="workspace" tabIndex={-1}>
+          <PacksView
+            packState={packState}
+            stickersById={stickersById}
+            selectedPackId={viewState.pack}
+            onSelectPack={(packId) => updateView({ pack: packId }, { push: true })}
+            packActions={packActions}
+            onOpenSticker={(id) => updateView({ view: 'library', id, pack: null }, { push: true })}
+            onGoToLibrary={() => navigate('library')}
+            bootstrapState={bootstrapState}
           />
         </main>
       ) : viewState.view === 'health' ? (
@@ -306,6 +359,17 @@ export default function App() {
               onConvertAttention={() => (attentionConvertibleIds.length > LARGE_BATCH_CONFIRM
                 ? setPendingConvertIds(attentionConvertibleIds)
                 : actions.startConvertJob(attentionConvertibleIds))}
+              membership={membership}
+              hasPacks={packState.packs.length > 0}
+              packBar={activePack && !selectionMode ? (
+                <PackBar
+                  pack={activePack}
+                  stickersById={stickersById}
+                  onOpen={() => openPacks(activePack.id)}
+                  onExport={() => packActions.exportPack(activePack.id)}
+                  exporting={packActions.exportingId === activePack.id}
+                />
+              ) : null}
             />
             {selectionMode && (
               <SelectionBar
@@ -318,6 +382,8 @@ export default function App() {
                 onTags={() => setTagsOpen(true)}
                 onClear={() => setSelectedIds(new Set())}
                 onDone={toggleSelectionMode}
+                packTitle={activePack?.title || null}
+                onAddToPack={addSelectedToPack}
               />
             )}
           </main>
@@ -334,6 +400,13 @@ export default function App() {
               selectedStartTimes={selectedStartTimes}
               setSelectedStartTimes={setSelectedStartTimes}
               copyText={actions.copyText}
+              packSection={packState.loaded ? {
+                activePack,
+                packs: packState.packs,
+                stickersById,
+                packActions,
+                onOpenPacks: openPacks
+              } : null}
             />
           )}
         </div>

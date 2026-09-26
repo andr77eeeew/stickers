@@ -42,6 +42,8 @@ const {
   verifyLibraryArchive
 } = require('./lib/libraryArchive');
 const { createLocalSecurity, isExtensionOrigin } = require('./lib/localSecurity');
+const { PackStore, PackError, PACK_ID_PATTERN } = require('./lib/packStore');
+const { buildPackExport } = require('./lib/packExport');
 const {
   HOST,
   PORT,
@@ -192,6 +194,16 @@ if (loadedDatabase.changed || initialReconciliation.changed) database.save(captu
 function saveDatabase() {
   database.save(capturedStickers);
 }
+
+// Packs live in their own file. The first write ever takes a library snapshot
+// so the state before packs existed can always be restored.
+const packStore = new PackStore(path.join(OUTPUT_DIR, 'packs.json'), {
+  beforeFirstWrite: () => {
+    if (capturedStickers.length) createLibraryArchive();
+  }
+});
+packStore.load();
+if (packStore.loadError) console.warn(`[Packs] packs.json is unreadable and left untouched: ${packStore.loadError}`);
 
 function refreshStorageHealth({ collectItems = false } = {}) {
   const reconciliation = reconcileStorage(capturedStickers, {
@@ -605,7 +617,7 @@ function createLibraryArchive() {
   return createLibraryArchiveSnapshot({
     outputDir: OUTPUT_DIR,
     archivesDir: ARCHIVES_DIR,
-    databaseFiles: [database.filePath, database.backupPath],
+    databaseFiles: [database.filePath, database.backupPath, packStore.filePath, packStore.backupPath],
     stickerCount: capturedStickers.length
   });
 }
@@ -1810,6 +1822,114 @@ app.post('/api/jobs/:id/cancel', (req, res) => {
   return res.json({ job });
 });
 
+// ----- Packs -----
+
+function broadcastPacks() {
+  broadcast({ type: 'packs_update', data: packStore.snapshot() });
+}
+
+function findSticker(id) {
+  return capturedStickers.find((sticker) => sticker.id === id) || null;
+}
+
+function sendPackError(res, error, action) {
+  if (error instanceof PackError) {
+    return res.status(error.status).json({ error: error.message, ...(error.pack ? { pack: error.pack } : {}) });
+  }
+  console.error(`[Packs] ${action} failed:`, error);
+  return res.status(500).json({ error: `${action} failed: ${error.message}` });
+}
+
+function requirePackId(req, res) {
+  const id = String(req.params.id);
+  if (!PACK_ID_PATTERN.test(id)) {
+    res.status(404).json({ error: 'Pack not found.' });
+    return null;
+  }
+  return id;
+}
+
+app.get('/api/packs', (_req, res) => {
+  res.json(packStore.snapshot());
+});
+
+app.post('/api/packs', (req, res) => {
+  try {
+    const pack = packStore.create(req.body?.title);
+    broadcastPacks();
+    return res.json({ pack, ...packStore.snapshot() });
+  } catch (error) {
+    return sendPackError(res, error, 'Creating the pack');
+  }
+});
+
+app.post('/api/packs/:id', (req, res) => {
+  const id = requirePackId(req, res);
+  if (!id) return undefined;
+  const { title, items, revision } = req.body || {};
+  try {
+    const pack = packStore.update(id, { title, items, revision }, {
+      resolveSticker: (stickerId) => findSticker(stickerId)
+    });
+    broadcastPacks();
+    return res.json({ pack });
+  } catch (error) {
+    return sendPackError(res, error, 'Saving the pack');
+  }
+});
+
+app.post('/api/packs/:id/activate', (req, res) => {
+  const id = requirePackId(req, res);
+  if (!id) return undefined;
+  try {
+    packStore.activate(id);
+    broadcastPacks();
+    return res.json(packStore.snapshot());
+  } catch (error) {
+    return sendPackError(res, error, 'Switching the current pack');
+  }
+});
+
+// Deletes only the pack record; stickers and their files stay in the library.
+app.post('/api/packs/:id/delete', (req, res) => {
+  const id = requirePackId(req, res);
+  if (!id) return undefined;
+  try {
+    packStore.remove(id);
+    broadcastPacks();
+    return res.json(packStore.snapshot());
+  } catch (error) {
+    return sendPackError(res, error, 'Deleting the pack');
+  }
+});
+
+// Builds the ZIP in memory from the current outputs; nothing is written to disk.
+app.get('/api/packs/:id/export', (req, res) => {
+  const id = requirePackId(req, res);
+  if (!id) return undefined;
+  try {
+    const pack = packStore.getPack(id);
+    const result = buildPackExport(pack, {
+      resolveSticker: findSticker,
+      outputSize: measureOutputSize,
+      readOutput: (sticker) => fs.readFileSync(resolveUnder(OUTPUT_DIR, sticker.convertedPath.replace(/^[/\\]+/, '')))
+    });
+    if (result.problems.length) {
+      return res.status(409).json({ error: 'The pack is not ready to export.', problems: result.problems });
+    }
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Length', String(result.zip.length));
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${result.fileName}"; filename*=UTF-8''${encodeURIComponent(result.fileName)}`
+    );
+    return res.end(result.zip);
+  } catch (error) {
+    return sendPackError(res, error, 'Exporting the pack');
+  }
+});
+
 // WebSocket Server Handshake
 server.on('upgrade', (request, socket, head) => {
   let pathname = '';
@@ -1835,7 +1955,8 @@ wss.on('connection', (ws) => {
     data: {
       ...getStatusPayload(),
       stickers: capturedStickers.map(toClientSticker),
-      ...getJobsPayload()
+      ...getJobsPayload(),
+      packs: packStore.snapshot()
     }
   }));
 });

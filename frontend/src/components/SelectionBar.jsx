@@ -1,7 +1,8 @@
-import { RefreshCw, Tag, X } from 'lucide-react';
+import { Package, RefreshCw, Tag, X } from 'lucide-react';
 
 export function SelectionBar({
-  count, convertibleCount, pageCount, allPageSelected, onTogglePage, onConvert, onTags, onClear, onDone
+  count, convertibleCount, pageCount, allPageSelected, onTogglePage, onConvert, onTags, onClear, onDone,
+  packTitle, onAddToPack
 }) {
   return (
     <div className="selection-bar" role="region" aria-label="Selection">
@@ -26,6 +27,15 @@ export function SelectionBar({
       </button>
       <button type="button" className="btn btn-small btn-light" disabled={!count} onClick={onTags}>
         <Tag size={14} aria-hidden="true" /> Tags…
+      </button>
+      <button
+        type="button"
+        className="btn btn-small btn-light"
+        disabled={!count || !packTitle}
+        title={packTitle ? `Add to “${packTitle}”` : 'Create a pack in Packs first'}
+        onClick={onAddToPack}
+      >
+        <Package size={14} aria-hidden="true" /> Add to pack
       </button>
       <button type="button" className="icon-btn icon-on-dark" aria-label="Exit selection" onClick={onDone}>
         <X size={18} aria-hidden="true" />

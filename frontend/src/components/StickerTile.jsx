@@ -14,7 +14,7 @@ const BADGE_TONE = {
   unmeasured: 'neutral'
 };
 
-export function StickerTile({ sticker, selected, eager, onOpen, selectionMode, checked, onToggle, queued }) {
+export function StickerTile({ sticker, selected, eager, onOpen, selectionMode, checked, onToggle, queued, packEntry }) {
   const stickerState = getStickerState(sticker);
   // A queued job item is shown until the server actually starts converting it.
   const state = queued && stickerState !== 'converting' ? 'queued' : stickerState;
@@ -23,7 +23,12 @@ export function StickerTile({ sticker, selected, eager, onOpen, selectionMode, c
   const duration = getStickerDuration(sticker);
   const shortId = getShortId(sticker);
   const typeLabel = sticker.isAnimated ? 'animated' : 'static';
-  const ariaLabel = `Sticker ${shortId}, ${typeLabel}, ${label}`;
+  // Only membership in the current pack is marked on the tile.
+  const inPack = Boolean(packEntry?.inActive);
+  const packLabel = inPack
+    ? (packEntry.emoji.length ? `, in current pack as ${packEntry.emoji.join(' ')}` : ', in current pack without emoji')
+    : '';
+  const ariaLabel = `Sticker ${shortId}, ${typeLabel}, ${label}${packLabel}`;
 
   const content = (
     <>
@@ -39,6 +44,14 @@ export function StickerTile({ sticker, selected, eager, onOpen, selectionMode, c
           <span className={`badge badge-${BADGE_TONE[state]} tile-badge-tr`}>
             {(state === 'converting' || state === 'queued') && <LoaderCircle size={11} className={state === 'converting' ? 'spin' : ''} aria-hidden="true" />}
             {label}
+          </span>
+        )}
+        {inPack && (
+          <span
+            className={`badge tile-badge-br tile-emoji ${packEntry.emoji.length ? 'badge-neutral' : 'badge-warning'}`}
+            title={packEntry.emoji.length ? 'In the current pack' : 'In the current pack, no emoji yet'}
+          >
+            {packEntry.emoji[0] || '?'}
           </span>
         )}
         {selectionMode && (

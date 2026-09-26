@@ -216,9 +216,12 @@ export const summarizeAttention = (stickers) => {
  * filter, so every number describes what clicking it would show.
  */
 export const selectCatalogue = (stickers, {
-  q = '', type = 'all', status = 'all', sort = 'newest', page = 1, pageSize = PAGE_SIZE
+  q = '', type = 'all', status = 'all', sort = 'newest', page = 1, pageSize = PAGE_SIZE,
+  unpacked = false, packedIds = null
 } = {}) => {
-  const searched = stickers.filter((sticker) => matchesSearch(sticker, q.trim()));
+  // "Not in a pack" narrows the set like search, so every count respects it.
+  const searched = stickers.filter((sticker) => matchesSearch(sticker, q.trim())
+    && !(unpacked && packedIds?.has(sticker.id)));
   const ofType = searched.filter((sticker) => matchesType(sticker, type));
   const ofStatus = searched.filter((sticker) => matchesStatus(sticker, status));
 
@@ -346,11 +349,13 @@ export const getTelegramCheck = (sticker) => {
 // ----- URL view state -----
 
 export const VIEW_DEFAULTS = {
-  view: 'library', q: '', type: 'all', status: 'all', sort: 'newest', page: 1, id: null
+  view: 'library', q: '', type: 'all', status: 'all', sort: 'newest', page: 1, id: null, unpacked: false, pack: null
 };
 
+const PACK_ID = /^p_[a-f0-9]{12}$/;
+
 const ALLOWED = {
-  view: ['library', 'health', 'editor'],
+  view: ['library', 'packs', 'health', 'editor'],
   type: ['all', 'static', 'animated'],
   status: ['all', 'ready', 'action', 'converting'],
   sort: ['newest', 'oldest', 'largest']
@@ -368,16 +373,18 @@ export const parseViewState = (search) => {
     status: pick('status'),
     sort: pick('sort'),
     page: Number.isInteger(page) && page > 0 ? page : 1,
-    id: id && /^[a-f0-9]{8,64}$/i.test(id) ? id : null
+    id: id && /^[a-f0-9]{8,64}$/i.test(id) ? id : null,
+    unpacked: params.get('unpacked') === '1',
+    pack: PACK_ID.test(params.get('pack') || '') ? params.get('pack') : null
   };
 };
 
 export const buildViewSearch = (state) => {
   const params = new URLSearchParams();
-  for (const key of ['view', 'q', 'type', 'status', 'sort', 'page', 'id']) {
+  for (const key of ['view', 'q', 'type', 'status', 'sort', 'page', 'id', 'unpacked', 'pack']) {
     const value = state[key];
     if (value === null || value === undefined || value === '' || value === VIEW_DEFAULTS[key]) continue;
-    params.set(key, String(value));
+    params.set(key, value === true ? '1' : String(value));
   }
   return params.toString();
 };
