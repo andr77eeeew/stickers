@@ -246,7 +246,9 @@ function createChrome({ storage = {}, resources = [TIKTOK_DOCUMENT] } = {}) {
   return { chrome, store, sessionStore, listeners, alarms, badge, panels };
 }
 
-function createFetch({ server }) {
+// With `upstream`, loopback requests go to a real sandbox server (test/helpers/
+// sandboxServer.js) as a Chrome extension request would, instead of the mock.
+function createFetch({ server, upstream = null }) {
   const calls = [];
   const violations = [];
 
@@ -270,6 +272,13 @@ function createFetch({ server }) {
     if (parsed.protocol !== 'http:' || !LOOPBACK_HOSTS.has(parsed.hostname)) {
       violations.push(url);
       throw new TypeError(`Non-loopback fetch refused: ${url}`);
+    }
+
+    if (upstream) {
+      return globalThis.fetch(`${upstream}${parsed.pathname}${parsed.search}`, {
+        ...options,
+        headers: { ...(options.headers || {}), Origin: EXTENSION_ORIGIN }
+      });
     }
 
     const reply = (await server.handle(parsed.pathname, options)) || {};
@@ -343,10 +352,10 @@ const READY_STORAGE = Object.freeze({
   captureEnabled: true
 });
 
-async function loadBackground({ storage = READY_STORAGE } = {}) {
+async function loadBackground({ storage = READY_STORAGE, upstream = null } = {}) {
   const env = createChrome({ storage });
   const server = defaultServer();
-  const network = createFetch({ server });
+  const network = createFetch({ server, upstream });
   const queue = createMemoryQueueStore();
   const intervals = [];
   const context = createContext(env.chrome, network.fetch, intervals);

@@ -109,7 +109,9 @@ function renderOverall(status) {
 function renderSetup(hasToken) {
   const setup = !hasToken;
   if (setup === needsSetup) return;
+  const justConnected = needsSetup === true && !setup;
   needsSetup = setup;
+  if (justConnected) elements.settingsBox.open = false;
   elements.settingsBox.classList.toggle('needs-setup', setup);
   elements.settingsLabel.textContent = setup ? 'Connect to Sticker Workspace' : 'Settings';
   elements.saveLabel.textContent = setup ? 'Connect' : 'Save and reconnect';

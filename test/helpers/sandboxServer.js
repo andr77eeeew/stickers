@@ -41,7 +41,7 @@ function waitForReady(child) {
  * Starts server.js against an empty library in a temp folder and returns a
  * dashboard-authenticated client. Never points at the real output folder.
  */
-async function startSandboxServer(prefix = 'stickers-sandbox-test-', { seed = null } = {}) {
+async function startSandboxServer(prefix = 'stickers-sandbox-test-', { seed = null, env = {} } = {}) {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   const outputDir = path.join(sandbox, 'output');
   const tempDir = path.join(sandbox, 'temp');
@@ -49,15 +49,18 @@ async function startSandboxServer(prefix = 'stickers-sandbox-test-', { seed = nu
   const port = await reservePort();
   const origin = `http://127.0.0.1:${port}`;
   let child;
+  let output = '';
   const headers = { Origin: origin };
 
   const launch = async () => {
     child = spawn(process.execPath, ['server.js'], {
       cwd: projectRoot,
-      env: { ...process.env, PORT: String(port), INGEST_TOKEN: '', STICKER_OUTPUT_DIR: outputDir, STICKER_TEMP_DIR: tempDir },
+      env: { ...process.env, PORT: String(port), INGEST_TOKEN: '', STICKER_OUTPUT_DIR: outputDir, STICKER_TEMP_DIR: tempDir, ...env },
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
     });
+    child.stdout.on('data', (data) => { output += data.toString(); });
+    child.stderr.on('data', (data) => { output += data.toString(); });
     await waitForReady(child);
     const session = await fetch(`${origin}/api/session`, { headers: { Origin: origin } });
     headers.Cookie = session.headers.get('set-cookie').split(';')[0];
@@ -98,7 +101,7 @@ async function startSandboxServer(prefix = 'stickers-sandbox-test-', { seed = nu
     fs.rmSync(sandbox, { recursive: true, force: true });
   };
 
-  return { origin, port, get cookie() { return headers.Cookie; }, headers, outputDir, tempDir, request, restart, stop };
+  return { origin, port, get cookie() { return headers.Cookie; }, get output() { return output; }, headers, outputDir, tempDir, request, restart, stop };
 }
 
 module.exports = { startSandboxServer };

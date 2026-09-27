@@ -107,7 +107,7 @@ Popup и панель — тёмная тема со свечением (`#090d1
 5. Переименование: `Sticker Workspace Capture`; версия manifest `3.0.0`.
 6. Доступность: `label` у полей, `aria-live` только для итогов, клавиатура, `prefers-reduced-motion`.
 
-### Этап E6. Проверка и выпуск (1–2 дня)
+### Этап E6. Проверка и выпуск (1–2 дня) — автоматическая часть выполнена, ручная приёмка ждёт тестового аккаунта, [E6.md](E6.md)
 
 1. `npm run check` + новые тесты E0–E3.
 2. UI smoke popup и панели в headless Chrome по `file://` с shim `chrome.*` (установленный Chrome не загружает unpacked-расширения из командной строки): состояния Off / Watching / Paused / Delivery failed / blocked item, светлая и тёмная тема панели, отсутствие overflow.
