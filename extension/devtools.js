@@ -110,7 +110,7 @@ if (typeof addEventListener === 'function') {
 
 chrome.devtools.panels.create(
   'Sticker Capture',
-  '',
+  'icons/icon-16.png',
   'panel.html'
 );
 

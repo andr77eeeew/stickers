@@ -3,98 +3,122 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Sticker Capture</title>
+  <title>Sticker Workspace Capture</title>
+  <link rel="stylesheet" href="shared/tokens.css" />
+  <link rel="stylesheet" href="shared/ui.css" />
   <link rel="stylesheet" href="panel.css" />
+  <!-- Applies the DevTools theme before the first paint. -->
+  <script src="panelTheme.js"></script>
 </head>
 <body>
-  <main>
-    <header>
-      <div>
-        <h1>Sticker Capture</h1>
-        <p>Reads completed DevTools response bodies. It never refetches TikTok media.</p>
-      </div>
-      <label class="switch">
-        <input id="captureEnabled" type="checkbox" />
-        <span>Capture enabled</span>
-      </label>
-    </header>
+  <header class="panel-header">
+    <div class="brand">
+      <span class="brand-mark"><span class="icon" data-icon="sparkles"></span></span>
+      <span class="brand-name">
+        <strong>Sticker Workspace</strong>
+        <span>Capture · reads responses DevTools already received</span>
+      </span>
+    </div>
+    <p id="overall" class="status-pill tone-pending" role="status">
+      <span class="dot"></span><span id="overallText">Checking…</span>
+    </p>
+    <label class="switch-row header-switch" for="captureEnabled">
+      <span class="switch-label"><strong>Capture</strong></span>
+      <input id="captureEnabled" type="checkbox" role="switch" class="switch" />
+    </label>
+  </header>
 
-    <section class="status-grid" aria-live="polite">
-      <article>
-        <span>DevTools listener</span>
-        <strong id="listenerState">Checking...</strong>
-      </article>
-      <article>
-        <span>Local server</span>
-        <strong id="serverState">Checking...</strong>
-      </article>
-      <article>
-        <span>Durable queue</span>
-        <strong id="queueState">0</strong>
-      </article>
-      <article>
-        <span>Delivered</span>
-        <strong id="deliveredCount">0</strong>
-      </article>
-    </section>
+  <main class="panel-layout">
+    <div class="panel-column">
+      <section class="stat-grid" aria-label="Status">
+        <article class="stat">
+          <span class="stat-label">DevTools</span>
+          <strong id="listenerState" class="stat-value">Checking…</strong>
+        </article>
+        <article class="stat">
+          <span class="stat-label">Local server</span>
+          <strong id="serverState" class="stat-value">Checking…</strong>
+        </article>
+        <article class="stat">
+          <span class="stat-label">Queue</span>
+          <strong id="queueState" class="stat-value tabular">—</strong>
+        </article>
+        <article class="stat">
+          <span class="stat-label">Delivered</span>
+          <strong id="deliveredCount" class="stat-value tabular">0</strong>
+        </article>
+      </section>
 
-    <section class="pacing" aria-labelledby="pacingTitle">
-      <div class="section-header">
-        <h2 id="pacingTitle">Pacing</h2>
-        <strong id="sessionLine" class="tabular">No capture session yet</strong>
-      </div>
-      <ul id="warnings" class="warnings" aria-live="polite"></ul>
-      <details class="checklist">
-        <summary>Safer capture checklist</summary>
-        <ul>
-          <li>Open DevTools in a separate window (⋮ → Dock side → Undock): docked DevTools changes the page size, which a site can notice.</li>
-          <li>Keep “Disable cache” off in the Network panel.</li>
-          <li>Scroll the chat at a normal pace. Do not reload it to capture again; use Capture from Network log.</li>
-          <li>Keep sessions short and take breaks. A new session starts from the dashboard.</li>
-          <li>Stop if TikTok shows a verification check, a rate-limit message or any warning.</li>
-          <li>Use an account you can afford to lose. Manual import of saved files stays the safest path.</li>
-        </ul>
-      </details>
-    </section>
-
-    <section class="session">
-      <div class="section-header">
-        <div>
-          <h2>This session</h2>
-          <p class="hint">Stickers seen in this browser session. Thumbnails stay in memory and are cleared when Chrome closes.</p>
+      <section class="panel-section" aria-labelledby="sessionTitle">
+        <div class="section-title">
+          <div class="stack-tight">
+            <h2 id="sessionTitle">This session</h2>
+            <p class="hint">Stickers seen in this browser session. Thumbnails stay in memory and are cleared when Chrome closes.</p>
+          </div>
+          <div class="section-actions">
+            <button id="captureLog" type="button" class="btn btn-primary">
+              <span class="icon" data-icon="file-search"></span>Capture from Network log
+            </button>
+            <button id="clearFeed" type="button" class="btn">
+              <span class="icon" data-icon="eraser"></span>Clear
+            </button>
+          </div>
         </div>
-        <div class="section-actions">
-          <button id="captureLog" type="button">Capture from Network log</button>
-          <button id="clearFeed" type="button" class="secondary">Clear</button>
+        <p id="logResult" class="inline-alert tone-info" role="status" hidden></p>
+        <ul id="feed" class="feed"></ul>
+        <p id="feedEmpty" class="empty">Nothing captured yet. Stickers appear here as the chat loads them.</p>
+        <details id="diagnosticsBox" class="disclosure diagnostics" hidden>
+          <summary><span class="icon" data-icon="info"></span><span id="diagnosticsSummary">TikTok images refused by the policy</span></summary>
+          <p class="hint">
+            Counted locally to notice if TikTok changes its link format. Avatars and
+            previews are expected here; many "path not sticker specific" or "host not
+            allowed" entries while stickers are visible in the chat mean the policy
+            needs an update.
+          </p>
+          <ul id="diagnostics" class="diagnostics-list"></ul>
+        </details>
+      </section>
+    </div>
+
+    <div class="panel-column">
+      <section class="panel-section" aria-labelledby="pacingTitle">
+        <div class="section-title">
+          <h2 id="pacingTitle">Pacing</h2>
+          <span id="sessionLine" class="session-line tabular">No capture session yet</span>
         </div>
-      </div>
-      <p id="logResult" class="hint" role="status" hidden></p>
-      <ul id="feed" class="feed"></ul>
-      <p id="feedEmpty" class="hint">Nothing captured yet. Stickers appear here as the chat loads them.</p>
-      <details id="diagnosticsBox" class="diagnostics" hidden>
-        <summary id="diagnosticsSummary">TikTok images refused by the policy</summary>
-        <p class="hint">
-          Counted locally to notice if TikTok changes its link format. Avatars and
-          previews are expected here; many "path not sticker specific" or "host not
-          allowed" entries while stickers are visible in the chat mean the policy
-          needs an update.
-        </p>
-        <ul id="diagnostics"></ul>
-      </details>
-    </section>
+        <ul id="warnings" class="alerts"></ul>
+        <details class="disclosure">
+          <summary><span class="icon" data-icon="circle-check"></span>Safer capture checklist</summary>
+          <ul class="plain-list">
+            <li>Open DevTools in a separate window (⋮ → Dock side → Undock): docked DevTools changes the page size, which a site can notice.</li>
+            <li>Keep “Disable cache” off in the Network panel.</li>
+            <li>Scroll the chat at a normal pace. Do not reload it to capture again; use Capture from Network log.</li>
+            <li>Keep sessions short and take breaks. A new session starts from the dashboard.</li>
+            <li>Stop if TikTok shows a verification check, a rate-limit message or any warning.</li>
+            <li>Use an account you can afford to lose. Manual import of saved files stays the safest path.</li>
+          </ul>
+        </details>
+      </section>
 
-    <section class="activity">
-      <h2>Last activity</h2>
-      <p id="lastEvent">No capture events yet.</p>
-      <ol id="events" class="events"></ol>
-      <button id="retryQueue" type="button">Retry held items now</button>
-    </section>
+      <section class="panel-section" aria-labelledby="activityTitle">
+        <div class="section-title">
+          <h2 id="activityTitle">Activity</h2>
+          <button id="retryQueue" type="button" class="btn btn-small">
+            <span class="icon" data-icon="refresh-cw"></span>Retry held items
+          </button>
+        </div>
+        <p id="lastEvent" class="last-event">No capture events yet.</p>
+        <ol id="events" class="events"></ol>
+      </section>
 
-    <aside>
-      Keep DevTools open on the TikTok tab before stickers load; this panel
-      does not need to be selected. Live capture is never ban-safe.
-    </aside>
+      <p class="panel-note">
+        Keep DevTools open on the TikTok tab before stickers load; this panel does
+        not need to be selected. Nothing is requested from TikTok and the page is
+        never touched. Live capture is never ban-safe.
+      </p>
+    </div>
   </main>
+  <script src="shared/icons.js"></script>
   <script src="shared/stickerPolicy.js"></script>
   <script src="shared/capturePayload.js"></script>
   <script src="shared/capturePipeline.js"></script>

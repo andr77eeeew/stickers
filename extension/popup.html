@@ -3,103 +3,131 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Sticker Capture</title>
+  <title>Sticker Workspace Capture</title>
+  <link rel="stylesheet" href="shared/tokens.css" />
+  <link rel="stylesheet" href="shared/ui.css" />
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
-  <header>
-    <h1>DevTools Sticker Capture</h1>
-    <p class="sub">Local delivery only. No TikTok refetch or page automation.</p>
+  <header class="popup-header">
+    <div class="brand">
+      <span class="brand-mark"><span class="icon" data-icon="sparkles"></span></span>
+      <span class="brand-name">
+        <strong>Sticker Workspace</strong>
+        <span>Capture</span>
+      </span>
+    </div>
+    <p id="overall" class="status-pill tone-pending" role="status" aria-live="polite">
+      <span class="dot"></span><span id="overallText">Checking…</span>
+    </p>
   </header>
 
-  <section class="card status" aria-live="polite">
-    <div class="row">
-      <span>DevTools listener</span>
-      <strong id="listenerState">Checking...</strong>
-    </div>
-    <div class="row">
-      <span>Local server</span>
-      <strong id="serverState">Checking...</strong>
-    </div>
-    <div class="row">
-      <span>Durable queue</span>
-      <strong id="queueState">0</strong>
-    </div>
-    <div class="row">
-      <span>Session</span>
-      <strong id="sessionLine">No capture session yet</strong>
-    </div>
-    <ul id="warnings" class="warnings"></ul>
-    <p id="lastEvent" class="event">No activity yet.</p>
-  </section>
+  <main>
+    <section class="card">
+      <label class="switch-row" for="captureEnabled">
+        <span class="switch-label">
+          <strong>Capture from TikTok DMs</strong>
+          <span class="hint">Reads stickers the chat already loaded while DevTools is open.</span>
+        </span>
+        <input type="checkbox" role="switch" class="switch" id="captureEnabled" />
+      </label>
+    </section>
 
-  <section class="card" id="heldSection" hidden>
-    <h2>Held captures</h2>
-    <p class="hint">
-      Bytes that the local server did not accept. Retry them, save the file
-      for manual import, or discard it.
-    </p>
-    <ul id="heldList" class="held-list"></ul>
-  </section>
+    <section aria-labelledby="statusTitle" class="stack">
+      <h2 id="statusTitle">Status</h2>
+      <ul class="check-list">
+        <li class="check-row">
+          <span class="check-label">DevTools</span>
+          <span class="check-value" id="listenerState">Checking…</span>
+        </li>
+        <li class="check-row">
+          <span class="check-label">Local server</span>
+          <span class="check-value" id="serverState">Checking…</span>
+        </li>
+        <li class="check-row">
+          <span class="check-label">Queue</span>
+          <span class="check-value tabular" id="queueState">—</span>
+        </li>
+        <li class="check-row">
+          <span class="check-label">Session</span>
+          <span class="check-value tabular" id="sessionLine">No capture session yet</span>
+        </li>
+      </ul>
+      <ul id="warnings" class="alerts"></ul>
+      <p id="lastEvent" class="hint">No activity yet.</p>
+    </section>
 
-  <section class="card">
-    <label class="toggle-row">
-      <span>Capture enabled</span>
-      <input type="checkbox" id="captureEnabled" />
-    </label>
-
-    <label class="field">
-      Local server
-      <input
-        type="url"
-        id="serverUrl"
-        value="http://127.0.0.1:3001"
-        spellcheck="false"
-      />
-    </label>
-
-    <label class="field">
-      Connection token
-      <input
-        type="password"
-        id="ingestToken"
-        autocomplete="off"
-        spellcheck="false"
-        placeholder="Paste from the dashboard"
-      />
-    </label>
-    <p class="hint">
-      In Sticker Workspace open <strong>Health → Capture extension</strong>,
-      choose <strong>Connect extension</strong> and paste the token here.
-    </p>
-
-    <button id="saveSettings" type="button">Save and reconnect</button>
-    <button id="retryQueue" type="button" class="secondary full">
-      Retry held items
-    </button>
-    <p id="message" class="message" hidden></p>
-
-    <details class="advanced">
-      <summary>Advanced: token in .env</summary>
+    <section class="stack" id="heldSection" aria-labelledby="heldTitle" hidden>
+      <div class="section-title">
+        <h2 id="heldTitle">Held captures</h2>
+        <button id="retryQueue" type="button" class="btn btn-small">
+          <span class="icon" data-icon="refresh-cw"></span>Retry all
+        </button>
+      </div>
       <p class="hint">
-        Instead of connecting from the dashboard, generate a token here and set
-        the same value as <code>INGEST_TOKEN</code> in the server <code>.env</code>,
-        then restart the server. A token in <code>.env</code> takes priority.
+        The local server did not accept these files yet. Retry them, save a file
+        for manual import, or discard it.
       </p>
-      <div class="button-row">
-        <button id="generateToken" type="button" class="secondary">Generate</button>
-        <button id="copyToken" type="button" class="secondary">Copy</button>
+      <ul id="heldList" class="held-list"></ul>
+    </section>
+
+    <details class="card disclosure-card" id="settingsBox">
+      <summary id="settingsSummary"><span class="icon" data-icon="settings"></span><span id="settingsLabel">Settings</span></summary>
+      <div class="stack">
+        <ol id="connectSteps" class="plain-list" hidden>
+          <li>In Sticker Workspace open <strong>Health → Capture extension</strong>.</li>
+          <li>Choose <strong>Connect extension</strong> and copy the token.</li>
+          <li>Paste it below and choose <strong>Connect</strong>.</li>
+        </ol>
+        <label class="field" for="ingestToken">
+          Connection token
+          <input
+            type="password"
+            id="ingestToken"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Paste from the dashboard"
+            aria-describedby="tokenHint"
+          />
+        </label>
+        <p id="tokenHint" class="hint">Stored only in this browser profile and sent only to the local server.</p>
+        <label class="field" for="serverUrl">
+          Local server
+          <input type="url" id="serverUrl" value="http://127.0.0.1:3001" spellcheck="false" />
+        </label>
+        <button id="saveSettings" type="button" class="btn btn-primary btn-block">
+          <span class="icon" data-icon="plug"></span><span id="saveLabel">Save and reconnect</span>
+        </button>
+        <details class="disclosure">
+          <summary>Advanced: token in .env</summary>
+          <div class="stack">
+            <p class="hint">
+              Instead of connecting from the dashboard, generate a token here and set
+              the same value as <code>INGEST_TOKEN</code> in the server <code>.env</code>,
+              then restart the server. A token in <code>.env</code> takes priority.
+            </p>
+            <div class="button-row">
+              <button id="generateToken" type="button" class="btn">Generate</button>
+              <button id="copyToken" type="button" class="btn">Copy</button>
+            </div>
+          </div>
+        </details>
       </div>
     </details>
-  </section>
 
-  <section class="tips">
-    <p>1. Connect the extension in the dashboard (Health → Capture extension).</p>
-    <p>2. Turn on <strong>Capture enabled</strong>.</p>
-    <p>3. Open Chrome DevTools on the TikTok Messages tab and keep it open.</p>
-    <p>4. Only stickers loaded after DevTools opens can be captured. Do not reload the chat to capture again.</p>
-  </section>
+    <p id="message" class="inline-alert tone-ok" role="status" hidden></p>
 
+    <details class="card disclosure-card">
+      <summary><span class="icon" data-icon="info"></span>How capture works</summary>
+      <ol class="plain-list">
+        <li>Turn on capture, then open Chrome DevTools on the TikTok Messages tab and keep it open.</li>
+        <li>Only stickers that load after DevTools opens are captured. Do not reload the chat to capture again; use <strong>Capture from Network log</strong> in the DevTools panel.</li>
+        <li>Nothing is requested from TikTok and the page is never touched. Files go only to Sticker Workspace on this computer.</li>
+      </ol>
+    </details>
+  </main>
+
+  <script src="shared/icons.js"></script>
   <script src="shared/statusText.js"></script>
   <script src="popup.js"></script>
 </body>

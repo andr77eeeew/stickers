@@ -2,26 +2,33 @@
 
 const DEFAULT_SERVER_URL = 'http://127.0.0.1:3001';
 const elements = {
+  overall: document.getElementById('overall'),
+  overallText: document.getElementById('overallText'),
   listenerState: document.getElementById('listenerState'),
   serverState: document.getElementById('serverState'),
   queueState: document.getElementById('queueState'),
+  sessionLine: document.getElementById('sessionLine'),
+  warnings: document.getElementById('warnings'),
   lastEvent: document.getElementById('lastEvent'),
   captureEnabled: document.getElementById('captureEnabled'),
+  settingsBox: document.getElementById('settingsBox'),
+  settingsLabel: document.getElementById('settingsLabel'),
+  connectSteps: document.getElementById('connectSteps'),
   serverUrl: document.getElementById('serverUrl'),
   ingestToken: document.getElementById('ingestToken'),
   generateToken: document.getElementById('generateToken'),
   copyToken: document.getElementById('copyToken'),
   saveSettings: document.getElementById('saveSettings'),
+  saveLabel: document.getElementById('saveLabel'),
   retryQueue: document.getElementById('retryQueue'),
   message: document.getElementById('message'),
   heldSection: document.getElementById('heldSection'),
-  heldList: document.getElementById('heldList'),
-  sessionLine: document.getElementById('sessionLine'),
-  warnings: document.getElementById('warnings')
+  heldList: document.getElementById('heldList')
 };
 const WARNINGS_SHOWN = 2;
-const TONE_CLASS = Object.freeze({ ok: 'ok', pending: 'warn', problem: 'bad' });
 let heldSignature = '';
+let warningsSignature = '';
+let needsSetup = null;
 
 function storageGet(defaults) {
   return new Promise((resolve) => chrome.storage.local.get(defaults, resolve));
@@ -75,37 +82,71 @@ function isValidServerUrl(value) {
 
 function showMessage(text, isError) {
   elements.message.hidden = false;
-  elements.message.textContent = text;
-  elements.message.className = isError ? 'message error' : 'message';
+  elements.message.className = `inline-alert ${isError ? 'tone-problem' : 'tone-ok'}`;
+  elements.message.replaceChildren(
+    Icons.element(isError ? 'octagon-x' : 'circle-check'),
+    document.createTextNode(text)
+  );
 }
 
-function setState(element, text, className) {
-  element.textContent = text;
-  element.className = className || '';
-}
-
+// A status row value: a tone dot and the text, as in the dashboard.
 function setDescribed(element, description) {
-  setState(element, description.text, TONE_CLASS[description.tone]);
+  const dot = document.createElement('span');
+  dot.className = 'dot';
+  element.className = `check-value tone-${description.tone}`;
+  element.replaceChildren(dot, document.createTextNode(description.text));
+}
+
+function renderOverall(status) {
+  const overall = StatusText.describeOverall(status);
+  elements.overall.className = `status-pill tone-${overall.tone}`;
+  if (elements.overallText.textContent !== overall.text) {
+    elements.overallText.textContent = overall.text;
+  }
+}
+
+// Without a token the settings open as the Connect step.
+function renderSetup(hasToken) {
+  const setup = !hasToken;
+  if (setup === needsSetup) return;
+  needsSetup = setup;
+  elements.settingsBox.classList.toggle('needs-setup', setup);
+  elements.settingsLabel.textContent = setup ? 'Connect to Sticker Workspace' : 'Settings';
+  elements.saveLabel.textContent = setup ? 'Connect' : 'Save and reconnect';
+  elements.connectSteps.hidden = !setup;
+  if (setup) elements.settingsBox.open = true;
+}
+
+function renderWarnings(status) {
+  const warnings = (status.warnings || [])
+    .map(StatusText.describeWarning)
+    .filter(Boolean)
+    .slice(0, WARNINGS_SHOWN);
+  const signature = warnings.map((warning) => warning.text).join('|');
+  if (signature === warningsSignature) return;
+  warningsSignature = signature;
+  elements.warnings.replaceChildren(...warnings.map((warning) => {
+    const item = document.createElement('li');
+    item.className = `inline-alert tone-${warning.tone}`;
+    item.append(Icons.element(Icons.TONE_ICONS[warning.tone]), document.createTextNode(warning.text));
+    return item;
+  }));
 }
 
 function renderStatus(status) {
   elements.captureEnabled.checked = status.captureEnabled !== false;
+  renderOverall(status);
+  renderSetup(status.hasToken);
   setDescribed(elements.listenerState, StatusText.describeListener(status.listenerState));
   setDescribed(elements.serverState, StatusText.describeServer(status.serverState));
   setDescribed(
     elements.queueState,
     StatusText.describeQueue(status.queue, status.pausedReason)
   );
-  elements.lastEvent.textContent = status.lastEvent || 'No activity yet.';
   const session = StatusText.describeSession(status.session, Date.now());
-  setState(elements.sessionLine, session ? session.text : 'No capture session yet', session ? TONE_CLASS[session.tone] : '');
-  const warnings = (status.warnings || []).map(StatusText.describeWarning).filter(Boolean).slice(0, WARNINGS_SHOWN);
-  elements.warnings.replaceChildren(...warnings.map((warning) => {
-    const item = document.createElement('li');
-    item.className = TONE_CLASS[warning.tone];
-    item.textContent = warning.text;
-    return item;
-  }));
+  setDescribed(elements.sessionLine, session || { tone: 'ok', text: 'No capture session yet' });
+  renderWarnings(status);
+  elements.lastEvent.textContent = status.lastEvent ? `Last: ${status.lastEvent}` : 'No activity yet.';
 }
 
 function base64ToBlob(contentBase64, mimeType) {
@@ -132,29 +173,38 @@ async function saveHeldItem(item) {
   showMessage('File saved. Import it in the dashboard with Import.', false);
 }
 
+function iconButton(icon, text) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'btn btn-small';
+  const label = document.createElement('span');
+  label.textContent = text;
+  button.append(Icons.element(icon), label);
+  return { button, label };
+}
+
 function renderHeldItem(item) {
   const row = document.createElement('li');
+  row.className = item.state === 'paused' ? 'held-item is-paused' : 'held-item';
   const label = document.createElement('span');
-  const reason = item.state === 'paused' ? 'Paused: capture budget' : `Blocked: ${item.lastError || 'rejected'}`;
+  label.className = 'held-reason';
+  const reason = item.state === 'paused'
+    ? 'Paused: session limit'
+    : `Blocked: ${StatusText.describeReason(item.lastError) || 'rejected'}`;
   label.textContent = `${reason} · ${StatusText.formatBytesFromBase64(item.base64Length)}`;
 
-  const save = document.createElement('button');
-  save.type = 'button';
-  save.className = 'secondary';
-  save.textContent = 'Save file';
+  const { button: save } = iconButton('download', 'Save file');
   save.addEventListener('click', () => {
     void saveHeldItem(item).catch(() => showMessage('Unable to save the file.', true));
   });
 
   // Discarding deletes the only copy of the bytes, so it takes two clicks.
-  const discard = document.createElement('button');
-  discard.type = 'button';
-  discard.className = 'secondary';
-  discard.textContent = 'Discard';
+  const { button: discard, label: discardLabel } = iconButton('trash-2', 'Discard');
   discard.addEventListener('click', async () => {
     if (discard.dataset.armed !== 'true') {
       discard.dataset.armed = 'true';
-      discard.textContent = 'Confirm discard';
+      discard.classList.add('btn-danger');
+      discardLabel.textContent = 'Confirm discard';
       return;
     }
     discard.disabled = true;
@@ -164,7 +214,10 @@ function renderHeldItem(item) {
     await refreshStatus();
   });
 
-  row.append(label, save, discard);
+  const actions = document.createElement('div');
+  actions.className = 'held-actions';
+  actions.append(save, discard);
+  row.append(label, actions);
   return row;
 }
 
@@ -188,7 +241,7 @@ async function refreshStatus(messageType = 'GET_STATUS') {
     const response = await sendMessage({ type: messageType });
     if (response.ok) renderStatus(response);
   } catch {
-    setState(elements.serverState, 'Extension unavailable', 'bad');
+    setDescribed(elements.serverState, { tone: 'problem', text: 'Extension unavailable' });
   }
 }
 
@@ -231,10 +284,12 @@ elements.saveSettings.addEventListener('click', async () => {
   const ingestToken = elements.ingestToken.value.trim();
   if (!isValidServerUrl(serverUrl)) {
     showMessage('Use exactly http://127.0.0.1:3001 or http://localhost:3001.', true);
+    elements.serverUrl.focus();
     return;
   }
   if (!ingestToken) {
     showMessage('Paste the connection token from the dashboard first.', true);
+    elements.ingestToken.focus();
     return;
   }
 
@@ -271,15 +326,16 @@ elements.retryQueue.addEventListener('click', async () => {
   try {
     const response = await sendMessage({ type: 'RETRY_QUEUE' });
     if (response.ok) renderStatus(response);
-    showMessage('Held items released for another local delivery attempt.', false);
+    showMessage('Held captures released for another local delivery attempt.', false);
     await refreshHeld();
   } catch {
-    showMessage('Unable to retry the queue.', true);
+    showMessage('Unable to retry the held captures.', true);
   } finally {
     elements.retryQueue.disabled = false;
   }
 });
 
+Icons.hydrate(document);
 void load();
 setInterval(() => {
   void refreshStatus();

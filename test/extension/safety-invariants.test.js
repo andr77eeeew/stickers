@@ -112,7 +112,8 @@ test('extension code has no page automation or extra network channels', () => {
     [/chrome\s*\.\s*(scripting|debugger|tabs|webRequest|declarativeNetRequest|cookies|history|webNavigation|proxy|downloads)\b/, 'privileged chrome API'],
     [/\bdocument\s*\.\s*cookie\b/, 'document.cookie'],
     [/MutationObserver/, 'MutationObserver'],
-    [/https?:\/\/(?!127\.0\.0\.1[:/]|localhost[:/])[a-z0-9.-]+/i, 'non-loopback URL literal']
+    // The SVG namespace is an identifier, not an address; nothing is fetched from it.
+    [/https?:\/\/(?!127\.0\.0\.1[:/]|localhost[:/]|www\.w3\.org\/2000\/svg')[a-z0-9.-]+/i, 'non-loopback URL literal']
   ];
   for (const { file, source } of scripts) {
     for (const [pattern, label] of forbidden) {

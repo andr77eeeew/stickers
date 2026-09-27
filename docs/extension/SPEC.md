@@ -1,4 +1,4 @@
-# Спецификация расширения Sticker Capture
+# Спецификация расширения Sticker Workspace Capture
 
 Состояние: 27 сентября 2026 года, этап E2. Документ — источник истины для текстов статусов; этап E5 дополнит его визуальными правилами.
 
@@ -49,7 +49,7 @@ Dashboard показывает состояние слушателя тольк�
 | `offline` | Offline | problem |
 | `unauthorized` | Token rejected | problem |
 | `capture_disabled` | Capture disabled on server | problem |
-| `configuration_required` | Setup required | problem |
+| `configuration_required` | Setup required | pending |
 | `server_error` | Server error | problem |
 | `unknown` | Not checked | pending |
 
@@ -90,9 +90,30 @@ Dashboard показывает состояние слушателя тольк�
 ### Захват в dashboard (порядок приоритета)
 
 1. Нет токена → `Manual import`, кнопка `Connect extension`.
-2. Бюджет исчерпан → `Budget exhausted`.
-3. Ошибка доставки на сервере → `Delivery failed`.
-4. Свежий heartbeat → `Extension · <текст слушателя>`, «Last signal N s ago»; задержанные захваты делают тон `problem`.
-5. Иначе → `Last asset accepted` или `Awaiting DevTools` + «No signal from the extension».
+2. Предупреждение `challenge` → `Verification check`.
+3. Сессия исчерпана → `Session limit`.
+4. Ошибка доставки на сервере → `Delivery failed`.
+5. Свежий heartbeat → `Extension · <текст слушателя>`, «Last signal N s ago»; задержанные захваты или предупреждение `problem` делают тон `problem`, прочие предупреждения — `pending`.
+6. Иначе → `Last asset accepted` или `Awaiting DevTools` + «No signal from the extension».
 
 В шапке на ширине < 1024 px префикс `Local ·` скрывается, подпись обрезается многоточием (128 px, < 760 px — 100 px); полный текст — в popover.
+
+### Шапка popup и панели (порядок приоритета)
+
+`StatusText.describeOverall` — та же логика, что у dashboard, но расширение знает больше (токен, сервер, очередь):
+
+1. Нет токена → `Not connected` (pending); настройки popup раскрываются как шаг **Connect**.
+2. Проблема сервера → `Server offline`, `Token rejected`, `Server not connected`, `Server error` (problem).
+3. `challenge` → `Verification check` (problem).
+4. Захват выключен → `Capture off` (pending).
+5. Сессия исчерпана → `Session limit` (problem).
+6. Заблокированные захваты → `Delivery failed` (problem).
+7. Иначе короткий текст слушателя, как в dashboard (`Watching`, `DevTools closed`, `Other site`, `DevTools open`); тон повышают приостановленные захваты и предупреждения.
+
+## 4. Оформление (E5)
+
+- Токены — `extension/shared/tokens.css`: светлые значения из `docs/redesign/stage1/tokens.json` под именами переменных dashboard; тест `test/extension/design.test.js` сверяет их с `tokens.json` и `frontend/src/index.css`.
+- Popup всегда светлый, ширина 360 px. Панель DevTools следует `chrome.devtools.panels.themeName` (`panelTheme.js` ставит `data-theme` до первой отрисовки); тёмная палитра производная, контраст текста ≥ 4.5:1 на всех фонах проверяет тот же тест.
+- Компоненты (`shared/ui.css`) повторяют dashboard: brand mark, `status-pill` с точкой, кнопки `btn`/`btn-primary`/`btn-danger`, строки статуса `check-list`, `inline-alert` для предупреждений, переключатель `role="switch"`, focus-ring `#B8A7F5` 3 px.
+- Иконки — outline lucide (ISC), инлайн через `shared/icons.js`; значок расширения 16/32/48/128 рисует `scripts/render-extension-icons.js`. Цвета badge — токены `accent`, `danger`, `warning`, `textSecondary`.
+- `aria-live` только у итогов: pill статуса (`role="status"`), сообщение popup, итог разбора журнала Network. `prefers-reduced-motion` отключает переходы.

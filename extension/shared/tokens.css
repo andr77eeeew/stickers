@@ -1,0 +1,85 @@
+/* Sticker Workspace tokens for the extension pages.
+   Light values come from docs/redesign/stage1/tokens.json (stage1-rev2) and use
+   the dashboard's variable names (frontend/src/index.css);
+   test/extension/design-tokens.test.js keeps them in sync and checks contrast.
+   The popup always uses the light theme. The DevTools panel sets
+   data-theme="dark" when DevTools uses its dark theme. */
+:root {
+  --page: #ffffff;
+  --surface: #ffffff;
+  --surface-subtle: #f7f9fc;
+  --text: #111820;
+  --text-2: #5d6b80;
+  --border: #d7dee8;
+  --border-strong: #b7c2d1;
+  --accent: #5133d4;
+  --accent-hover: #4326bc;
+  --accent-subtle: #f0ecff;
+  --accent-border: #dcd3ff;
+  --accent-text: #5133d4;
+  --on-accent: #ffffff;
+  --focus: #b8a7f5;
+  --ok: #087a46;
+  --ok-subtle: #e7f6ee;
+  --ok-border: #bfe3cf;
+  --warning: #9a5b00;
+  --warning-subtle: #fff4de;
+  --warning-border: #f3d7a6;
+  --problem: #b42318;
+  --problem-hover: #912018;
+  --problem-subtle: #fdecea;
+  --problem-border: #f4c4bf;
+  --on-problem: #ffffff;
+  --dot-pending: #d19a00;
+  --preview-neutral: #f1f3f6;
+  --preview-checker: #e4e8ed;
+  --shadow: 0 12px 32px rgba(17, 24, 32, 0.14);
+
+  --font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --radius-tile: 8px;
+  --radius-control: 8px;
+  --radius-panel: 12px;
+  --focus-ring: 3px;
+  --control-min: 44px;
+  --fast: 120ms;
+  --normal: 180ms;
+
+  color-scheme: light;
+}
+
+/* Derived dark palette for the DevTools panel. Every text colour keeps a
+   contrast of at least 4.5:1 on page, surface and its subtle background. */
+:root[data-theme="dark"] {
+  --page: #12171e;
+  --surface: #181f28;
+  --surface-subtle: #1f2833;
+  --text: #e9eef4;
+  --text-2: #a3afbf;
+  --border: #2f3a47;
+  --border-strong: #46546a;
+  --accent: #6b52e8;
+  --accent-hover: #5a40dd;
+  --accent-subtle: #262046;
+  --accent-border: #3d3470;
+  --accent-text: #b3a5fa;
+  --on-accent: #ffffff;
+  --focus: #b8a7f5;
+  --ok: #5cd69b;
+  --ok-subtle: #12291f;
+  --ok-border: #1f4a36;
+  --warning: #f2b55c;
+  --warning-subtle: #2d2413;
+  --warning-border: #57431f;
+  --problem: #ff8f85;
+  --problem-hover: #ffaaa2;
+  --problem-subtle: #35191b;
+  --problem-border: #5e2a2c;
+  --on-problem: #12171e;
+  --dot-pending: #f2b55c;
+  --preview-neutral: #232c37;
+  --preview-checker: #2c3642;
+  --shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+
+  color-scheme: dark;
+}

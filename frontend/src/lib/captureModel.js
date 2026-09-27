@@ -10,8 +10,9 @@ export const LISTENER_LABELS = Object.freeze({
   watching: { tone: 'ok', text: 'Watching TikTok tab' }
 });
 
-// Compact forms for the header pill; the popover shows the full text.
-const LISTENER_SHORT = Object.freeze({
+// Compact forms for the header pill; the popover shows the full text. The
+// extension pill uses the same forms (statusText.js LISTENER_SHORT).
+export const LISTENER_SHORT = Object.freeze({
   off: 'Capture off',
   closed: 'DevTools closed',
   other_site: 'Other site',

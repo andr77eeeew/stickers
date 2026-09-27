@@ -23,7 +23,7 @@
     offline: { tone: 'problem', text: 'Offline' },
     unauthorized: { tone: 'problem', text: 'Token rejected' },
     capture_disabled: { tone: 'problem', text: 'Capture disabled on server' },
-    configuration_required: { tone: 'problem', text: 'Setup required' },
+    configuration_required: { tone: 'pending', text: 'Setup required' },
     server_error: { tone: 'problem', text: 'Server error' },
     unknown: { tone: 'pending', text: 'Not checked' }
   });
@@ -50,15 +50,61 @@
     return { tone: 'ok', text: 'Empty' };
   }
 
+  // Compact listener texts, the same as the dashboard header pill.
+  const LISTENER_SHORT = Object.freeze({
+    off: 'Capture off',
+    closed: 'DevTools closed',
+    other_site: 'Other site',
+    watching_unconfirmed: 'DevTools open',
+    watching: 'Watching'
+  });
+
+  const SERVER_SHORT = Object.freeze({
+    offline: 'Server offline',
+    unauthorized: 'Token rejected',
+    capture_disabled: 'Server not connected',
+    configuration_required: 'Not connected',
+    server_error: 'Server error'
+  });
+
+  // The single most important state for the header pill of the popup and
+  // the panel, in the same order as the dashboard pill
+  // (frontend/src/lib/captureModel.js describeCapture).
+  function describeOverall(status) {
+    const current = status || {};
+    const codes = (current.warnings || []).map((warning) => warning && warning.code);
+    if (!current.hasToken) return { tone: 'pending', text: 'Not connected' };
+    if (SERVER_SHORT[current.serverState]) {
+      return { tone: current.serverState === 'configuration_required' ? 'pending' : 'problem', text: SERVER_SHORT[current.serverState] };
+    }
+    if (codes.includes('challenge')) return { tone: 'problem', text: 'Verification check' };
+    if (current.captureEnabled === false) return { tone: 'pending', text: 'Capture off' };
+    if (codes.includes('session_limit') || (current.session && current.session.exhausted)) {
+      return { tone: 'problem', text: 'Session limit' };
+    }
+    const queue = current.queue || {};
+    if (Number(queue.blocked) > 0) return { tone: 'problem', text: 'Delivery failed' };
+    const listener = describeListener(current.listenerState);
+    const tones = codes.map((code) => (describeWarning({ code }) || {}).tone);
+    const tone = tones.includes('problem') || Number(queue.paused) > 0
+      ? 'problem'
+      : tones.includes('pending') ? 'pending' : listener.tone;
+    return { tone, text: LISTENER_SHORT[current.listenerState] || listener.text };
+  }
+
   const FEED_REASONS = Object.freeze({
     capture_budget_exhausted: 'capture budget paused',
     content_type_mismatch: 'not a sticker image',
     queue_full: 'queue full'
   });
 
+  function describeReason(code) {
+    return code ? FEED_REASONS[code] || String(code).replace(/_/g, ' ') : '';
+  }
+
   // Session feed rows in the DevTools panel.
   function describeFeedItem(item) {
-    const reason = item && item.reason ? FEED_REASONS[item.reason] || item.reason : '';
+    const reason = describeReason(item && item.reason);
     switch (item && item.state) {
       case 'new':
         return { tone: 'ok', text: 'Added to library' };
@@ -166,6 +212,9 @@
     describeListener,
     describeServer,
     describeQueue,
+    LISTENER_SHORT,
+    describeOverall,
+    describeReason,
     describeFeedItem,
     describeLogSummary,
     WARNING_CODES,

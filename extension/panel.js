@@ -1,6 +1,8 @@
 'use strict';
 
 const elements = {
+  overall: document.getElementById('overall'),
+  overallText: document.getElementById('overallText'),
   captureEnabled: document.getElementById('captureEnabled'),
   listenerState: document.getElementById('listenerState'),
   serverState: document.getElementById('serverState'),
@@ -23,8 +25,9 @@ const elements = {
 let warningsSignature = '';
 let feedSignature = '';
 let diagnosticsSignature = '';
-const TONE_CLASS = Object.freeze({ ok: 'ok', pending: 'warn', problem: 'bad' });
 const EVENTS_SHOWN = 6;
+// Background event tones use 'warning'; the page vocabulary is 'pending'.
+const EVENT_TONES = Object.freeze({ problem: 'problem', warning: 'pending' });
 
 function sendMessage(message) {
   return new Promise((resolve, reject) => {
@@ -39,23 +42,27 @@ function sendMessage(message) {
   });
 }
 
-function setState(element, text, className) {
-  element.textContent = text;
-  element.className = className || '';
-}
-
-function setDescribed(element, description) {
-  setState(element, description.text, TONE_CLASS[description.tone]);
+// A status value: a tone dot and the text, as in the dashboard.
+function setDescribed(element, description, baseClass) {
+  const dot = document.createElement('span');
+  dot.className = 'dot';
+  const text = document.createElement('span');
+  text.textContent = description.text;
+  element.className = `${baseClass} tone-${description.tone}`;
+  element.replaceChildren(dot, text);
 }
 
 function renderEvents(events) {
   const items = (events || []).slice(1, EVENTS_SHOWN).map((event) => {
     const item = document.createElement('li');
-    item.className = event.tone === 'problem' ? 'bad' : event.tone === 'warning' ? 'warn' : '';
+    const tone = EVENT_TONES[event.tone];
+    if (tone) item.className = `tone-${tone}`;
     const time = document.createElement('time');
     time.dateTime = new Date(event.at).toISOString();
     time.textContent = new Date(event.at).toLocaleTimeString();
-    item.append(time, ` ${event.text}`);
+    const text = document.createElement('span');
+    text.textContent = event.text;
+    item.append(time, text);
     return item;
   });
   elements.events.replaceChildren(...items);
@@ -63,11 +70,17 @@ function renderEvents(events) {
 
 function render(status) {
   elements.captureEnabled.checked = status.captureEnabled !== false;
-  setDescribed(elements.listenerState, StatusText.describeListener(status.listenerState));
-  setDescribed(elements.serverState, StatusText.describeServer(status.serverState));
+  const overall = StatusText.describeOverall(status);
+  elements.overall.className = `status-pill tone-${overall.tone}`;
+  if (elements.overallText.textContent !== overall.text) {
+    elements.overallText.textContent = overall.text;
+  }
+  setDescribed(elements.listenerState, StatusText.describeListener(status.listenerState), 'stat-value');
+  setDescribed(elements.serverState, StatusText.describeServer(status.serverState), 'stat-value');
   setDescribed(
     elements.queueState,
-    StatusText.describeQueue(status.queue, status.pausedReason)
+    StatusText.describeQueue(status.queue, status.pausedReason),
+    'stat-value tabular'
   );
   elements.deliveredCount.textContent = String(
     status.counters && status.counters.delivered || 0
@@ -80,15 +93,19 @@ function render(status) {
 
 function renderPacing(status) {
   const session = StatusText.describeSession(status.session, Date.now());
-  setState(elements.sessionLine, session ? session.text : 'No capture session yet', session ? TONE_CLASS[session.tone] : '');
+  setDescribed(
+    elements.sessionLine,
+    session || { tone: 'ok', text: 'No capture session yet' },
+    'session-line tabular'
+  );
   const warnings = (status.warnings || []).map(StatusText.describeWarning).filter(Boolean);
   const signature = warnings.map((warning) => warning.text).join('|');
   if (signature === warningsSignature) return;
   warningsSignature = signature;
   elements.warnings.replaceChildren(...warnings.map((warning) => {
     const item = document.createElement('li');
-    item.className = TONE_CLASS[warning.tone];
-    item.textContent = warning.text;
+    item.className = `inline-alert tone-${warning.tone}`;
+    item.append(Icons.element(Icons.TONE_ICONS[warning.tone]), document.createTextNode(warning.text));
     return item;
   }));
 }
@@ -110,17 +127,14 @@ function renderFeedItem(item, serverUrl) {
     preview.alt = '';
   } else {
     preview = document.createElement('span');
-    preview.className = 'feed-placeholder';
     preview.textContent = (item.mimeType || '').replace('image/', '') || '—';
   }
   preview.classList.add('feed-thumb');
 
   const body = document.createElement('div');
   body.className = 'feed-body';
-  const description = StatusText.describeFeedItem(item);
   const state = document.createElement('strong');
-  state.className = TONE_CLASS[description.tone];
-  state.textContent = description.text;
+  setDescribed(state, StatusText.describeFeedItem(item), 'feed-state');
   const meta = document.createElement('span');
   meta.className = 'feed-meta';
   const time = new Date(item.at).toLocaleTimeString();
@@ -129,10 +143,11 @@ function renderFeedItem(item, serverUrl) {
 
   if (item.stickerId) {
     const link = document.createElement('a');
+    link.className = 'feed-link';
     link.href = libraryLink(serverUrl, item.stickerId);
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
-    link.textContent = 'Open in library';
+    link.append('Open in library', Icons.element('external-link'));
     body.append(link);
   }
 
@@ -193,9 +208,10 @@ function getHar() {
   });
 }
 
-function showLogResult(text) {
+function showLogResult(text, tone = 'info') {
   elements.logResult.hidden = false;
-  elements.logResult.textContent = text;
+  elements.logResult.className = `inline-alert tone-${tone}`;
+  elements.logResult.replaceChildren(Icons.element(Icons.TONE_ICONS[tone]), document.createTextNode(text));
 }
 
 // Reads responses DevTools already recorded; no request is repeated.
@@ -205,7 +221,7 @@ async function captureFromNetworkLog() {
   try {
     const site = await CapturePipeline.detectInspectedSite(chrome.devtools.inspectedWindow);
     if (site === 'other') {
-      showLogResult('DevTools is open on another site. Open it on the TikTok tab to capture from its Network log.');
+      showLogResult('DevTools is open on another site. Open it on the TikTok tab to capture from its Network log.', 'pending');
       return;
     }
     const policy = await StickerPolicy.loadPolicy(chrome.runtime.getURL('shared/sticker-policy.json'));
@@ -220,10 +236,11 @@ async function captureFromNetworkLog() {
     for (const entry of entries) {
       outcomes.push(await pipeline.processEntry(entry).catch(() => ({ outcome: 'skipped' })));
     }
-    showLogResult(StatusText.describeLogSummary(CapturePipeline.summarize(outcomes)));
+    const summary = CapturePipeline.summarize(outcomes);
+    showLogResult(StatusText.describeLogSummary(summary), summary.queued ? 'ok' : 'info');
     await refreshFeed();
   } catch (error) {
-    showLogResult(`Could not read the Network log: ${error.message}`);
+    showLogResult(`Could not read the Network log: ${error.message}`, 'problem');
   } finally {
     elements.captureLog.disabled = false;
   }
@@ -234,7 +251,7 @@ async function refresh() {
     const response = await sendMessage({ type: 'GET_STATUS' });
     if (response.ok) render(response);
   } catch {
-    setState(elements.serverState, 'Extension unavailable', 'bad');
+    setDescribed(elements.serverState, { tone: 'problem', text: 'Extension unavailable' }, 'stat-value');
   }
 }
 
@@ -264,6 +281,7 @@ elements.retryQueue.addEventListener('click', async () => {
   }
 });
 
+Icons.hydrate(document);
 void refresh();
 void refreshFeed();
 setInterval(() => {

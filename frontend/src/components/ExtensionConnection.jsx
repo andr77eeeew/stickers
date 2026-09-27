@@ -141,7 +141,7 @@ export function ExtensionConnection({ devtools, ready, copyText, focused, onFocu
             </button>
           </div>
           <ol className="muted small steps">
-            <li>Open the Sticker Capture extension popup in Chrome.</li>
+            <li>Open the Sticker Workspace Capture extension popup in Chrome.</li>
             <li>Paste the token into <strong>Connection token</strong> and choose <strong>Save and reconnect</strong>.</li>
             <li>Turn on <strong>Capture enabled</strong>, then open DevTools on the TikTok tab before stickers load.</li>
           </ol>

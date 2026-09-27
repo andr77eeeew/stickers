@@ -73,10 +73,12 @@ npm start
 
 ### Настройка расширения
 
-1. Откройте `chrome://extensions`, включите Developer mode и выберите **Load unpacked** → `extension/`.
-2. В dashboard откройте **Health → Capture extension** и нажмите **Connect extension**. Сервер создаёт токен и хранит его в `output/.ingest-token` (вне Git и вне архивов); показать его снова можно кнопкой **Show token**, отозвать — **Disconnect**. Вставьте токен в popup расширения (**Connection token**) и нажмите **Save and reconnect**. Альтернатива — `INGEST_TOKEN` в `.env` (раздел **Advanced** в popup); он имеет приоритет над подключением из dashboard.
+1. Откройте `chrome://extensions`, включите Developer mode и выберите **Load unpacked** → `extension/`. Расширение называется **Sticker Workspace Capture** (версия 3.0.0; до E5 — «TikTok DM Sticker Capture»). Уже установленную копию достаточно обновить кнопкой перезагрузки на карточке расширения: настройки и очередь сохраняются.
+2. В dashboard откройте **Health → Capture extension** и нажмите **Connect extension**. Сервер создаёт токен и хранит его в `output/.ingest-token` (вне Git и вне архивов); показать его снова можно кнопкой **Show token**, отозвать — **Disconnect**. Пока токена нет, popup сам открывает шаг **Connect to Sticker Workspace**: вставьте токен в **Connection token** и нажмите **Connect** (позже этот блок свёрнут в **Settings**). Альтернатива — `INGEST_TOKEN` в `.env` (раздел **Advanced** в popup); он имеет приоритет над подключением из dashboard.
 3. Оставьте server URL равным `http://127.0.0.1:3001` или `http://localhost:3001`. Расширение доставляет только на порт 3001; при другом `PORT` сервер предупреждает об этом при старте.
-4. Включите **Capture enabled**. Popup показывает состояние слушателя (`Capture off`, `DevTools not open`, `DevTools on another site`, `Watching TikTok tab`), локального сервера (`Online`, `Token rejected`, `Capture disabled on server`, `Offline`…) и очереди.
+4. Включите переключатель **Capture from TikTok DMs**. В шапке popup — общий статус (как pill в dashboard), ниже — состояние слушателя (`Capture off`, `DevTools not open`, `DevTools on another site`, `Watching TikTok tab`), локального сервера (`Online`, `Token rejected`, `Capture disabled on server`, `Offline`…), очереди и сессии.
+
+Popup и панель оформлены в системе Sticker Workspace (токены `docs/redesign/stage1/tokens.json`); popup всегда светлый, панель DevTools следует теме DevTools. Иконки расширения пересобирает `node scripts/render-extension-icons.js`.
 
 ### Захват
 
